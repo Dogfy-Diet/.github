@@ -5,12 +5,15 @@ on:
       environment:
         required: true
         type: string
+        description: "GitHub environment (stg or production)"
       service:
         required: true
         type: string
+        description: "Cloud Run service name (e.g. dogfy-new-help-center)"
       version:
         type: string
         default: ""
+        description: "Semver tag for production (e.g. v1.4.0)"
       region:
         type: string
         default: "europe-west1"
@@ -23,6 +26,7 @@ on:
       build_args:
         type: string
         default: ""
+        description: "Docker build args (e.g. NODE_VERSION=22)"
       node_version:
         type: string
         default: "22"
@@ -35,9 +39,11 @@ on:
       promote_from:
         type: string
         default: ""
+        description: "GCP project to promote image from (production only)"
       smoke_test_path:
         type: string
         default: ""
+        description: "Path for smoke test (e.g. /api/health)"
     outputs:
       image:
         value: ${{ jobs.deploy.outputs.image }}
@@ -55,11 +61,138 @@ jobs:
     outputs:
       image: ${{ steps.resolve.outputs.image }}
       url: ${{ steps.url.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
-      - run: echo "Deploying ${{ inputs.service }} to ${{ inputs.environment }}"
-      - id: resolve
-        run: echo "image=test" >> "$GITHUB_OUTPUT"
-      - id: url
-        run: echo "url=test" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: inputs.promote_from == ''
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies
+        if: inputs.promote_from == ''
+        run: ${{ inputs.install_command }}
+
+      - name: Build application
+        if: inputs.promote_from == ''
+        run: ${{ inputs.build_command }}
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@v3
+        if: inputs.promote_from == ''
+
+      # ── Build (staging) ──────────────────────────────────────
+      - name: Build & Push
+        id: build
+        if: inputs.promote_from == ''
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }}
+            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:stg-latest
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      # ── Promote (production: reuse staging image) ────────────
+      - name: Promote image
+        id: promote
+        if: inputs.promote_from != ''
+        run: |
+          SRC="${{ inputs.region }}-docker.pkg.dev/${{ inputs.promote_from }}/docker/${{ inputs.service }}:stg-latest"
+          DST="${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}"
+
+          gcloud artifacts docker images copy "$SRC" "${DST}:${{ inputs.version }}" --quiet || {
+            docker pull "$SRC"
+            docker tag "$SRC" "${DST}:${{ inputs.version }}"
+            docker tag "$SRC" "${DST}:pro-latest"
+            docker push "${DST}:${{ inputs.version }}"
+            docker push "${DST}:pro-latest"
+          }
+          echo "image=${DST}:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve image
+        id: resolve
+        run: |
+          if [ -n "${{ steps.promote.outputs.image }}" ]; then
+            echo "image=${{ steps.promote.outputs.image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Deploy (image only — Terraform manages all config) ───
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ inputs.service }} \
+            --image=${{ steps.resolve.outputs.image }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+
+      - name: Get service URL
+        id: url
+        run: |
+          URL=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(status.url)')
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      # ── Cleanup preview tags (staging only) ──────────────────
+      - name: Cleanup preview tags
+        if: inputs.environment == 'stg'
+        run: |
+          TAGS=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
+            --format='value(status.traffic.tag)' 2>/dev/null | grep "^pr-" || true)
+          for TAG in $TAGS; do
+            gcloud run services update-traffic ${{ inputs.service }} \
+              --remove-tags="$TAG" \
+              --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} || true
+          done
+
+      # ── Smoke test ───────────────────────────────────────────
+      - name: Smoke test
+        if: inputs.smoke_test_path != ''
+        run: |
+          URL="${{ steps.url.outputs.url }}${{ inputs.smoke_test_path }}"
+          sleep 15
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
+            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+              echo "Smoke test passed (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS"
+            sleep 10
+          done
+          echo "Smoke test FAILED after 5 attempts"
+          exit 1
+
+      # ── Summary ──────────────────────────────────────────────
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Deploy: ${{ inputs.service }} → ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | \`${{ steps.resolve.outputs.image }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| URL | ${{ steps.url.outputs.url }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | ${{ inputs.version || 'staging' }} |" >> "$GITHUB_STEP_SUMMARY"
