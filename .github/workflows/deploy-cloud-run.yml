@@ -8,9 +8,61 @@ on:
       service:
         required: true
         type: string
+      version:
+        type: string
+        default: ""
+      region:
+        type: string
+        default: "europe-west1"
+      dockerfile:
+        type: string
+        default: "Dockerfile"
+      context:
+        type: string
+        default: "."
+      build_args:
+        type: string
+        default: ""
+      node_version:
+        type: string
+        default: "22"
+      install_command:
+        type: string
+        default: "npm ci"
+      build_command:
+        type: string
+        default: "npm run build"
+      promote_from:
+        type: string
+        default: ""
+      smoke_test_path:
+        type: string
+        default: ""
+    outputs:
+      image:
+        value: ${{ jobs.deploy.outputs.image }}
+      url:
+        value: ${{ jobs.deploy.outputs.url }}
 
 jobs:
   deploy:
+    name: "Deploy to ${{ inputs.environment }}"
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.service }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      url: ${{ steps.url.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
+      - uses: actions/checkout@v4
       - run: echo "Deploying ${{ inputs.service }} to ${{ inputs.environment }}"
+      - id: resolve
+        run: echo "image=test" >> "$GITHUB_OUTPUT"
+      - id: url
+        run: echo "url=test" >> "$GITHUB_OUTPUT"
