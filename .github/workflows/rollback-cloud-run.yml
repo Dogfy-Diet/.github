@@ -1,0 +1,58 @@
+name: Rollback Cloud Run
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+        description: "Version to rollback to (e.g. v1.3.2)"
+      region:
+        type: string
+        default: "europe-west1"
+      smoke_test_path:
+        type: string
+        default: ""
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-${{ inputs.service }}-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.SA_EMAIL }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Rollback
+        run: |
+          IMAGE="${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:${{ inputs.version }}"
+          gcloud run deploy ${{ inputs.service }} \
+            --image="$IMAGE" \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+
+      - name: Verify
+        if: inputs.smoke_test_path != ''
+        run: |
+          URL=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
+            --format='value(status.url)')
+          sleep 10
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${URL}${{ inputs.smoke_test_path }}")
+          echo "Rollback to ${{ inputs.version }} — HTTP $STATUS"
+
+      - name: Summary
+        run: |
+          echo "### Rollback: ${{ inputs.service }} → ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triggered by @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"

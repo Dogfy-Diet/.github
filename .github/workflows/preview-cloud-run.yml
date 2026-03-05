@@ -1,0 +1,116 @@
+name: Preview Cloud Run
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      region:
+        type: string
+        default: "europe-west1"
+      dockerfile:
+        type: string
+        default: "Dockerfile"
+      context:
+        type: string
+        default: "."
+      build_args:
+        type: string
+        default: ""
+      node_version:
+        type: string
+        default: "22"
+      install_command:
+        type: string
+        default: "npm ci"
+      build_command:
+        type: string
+        default: "npm run build"
+    outputs:
+      preview_url:
+        value: ${{ jobs.preview.outputs.url }}
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    environment: stg
+    concurrency:
+      group: preview-${{ inputs.service }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    outputs:
+      url: ${{ steps.tag-url.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - run: ${{ inputs.install_command }}
+      - run: ${{ inputs.build_command }}
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }}
+            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Deploy preview
+        run: |
+          gcloud run deploy ${{ inputs.service }} \
+            --image=${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }} \
+            --tag=pr-${{ github.event.pull_request.number }} \
+            --no-traffic \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+
+      - name: Get preview URL
+        id: tag-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(status.url)')
+          URL=$(echo "$SERVICE_URL" | sed "s|https://|https://pr-${{ github.event.pull_request.number }}---|")
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on PR
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ### Preview deployed
+            | | |
+            |---|---|
+            | Service | `${{ inputs.service }}` |
+            | URL | ${{ steps.tag-url.outputs.url }} |
+            | Commit | `${{ github.sha }}` |
+
+            > Preview shares staging DB and secrets. No production traffic.

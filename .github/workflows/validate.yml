@@ -1,0 +1,33 @@
+name: Validate
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        default: "22"
+      install_command:
+        type: string
+        default: "npm ci"
+      lint_command:
+        type: string
+        default: "npm run lint"
+      test_command:
+        type: string
+        default: "npm test"
+      build_command:
+        type: string
+        default: "npm run build"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: ${{ inputs.install_command }}
+      - run: ${{ inputs.lint_command }}
+      - run: ${{ inputs.test_command }}
+      - run: ${{ inputs.build_command }}
