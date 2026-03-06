@@ -1,0 +1,55 @@
+# =============================================================================
+# REUSABLE WORKFLOW: CLEANUP PREVIEW
+# =============================================================================
+# Removes the Cloud Run traffic tag and AR image tag for a closed PR.
+# Called from the caller workflow on pull_request.closed events.
+#
+# Without this, stale previews linger until the next staging deploy.
+# This gives immediate cleanup when a PR is closed or merged.
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/cleanup-preview.yml
+#
+# Required GitHub variables:
+#   Repository level : AR_REPO
+#   Environment "stg": GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
+# =============================================================================
+name: Cleanup Preview
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      region:
+        type: string
+        default: "europe-west1"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: stg
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Remove traffic tag
+        run: |
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --remove-tags=pr-${{ github.event.pull_request.number }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} 2>/dev/null || true
+
+      - name: Delete preview image tag
+        run: |
+          gcloud artifacts docker tags delete \
+            "${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}" \
+            --quiet 2>/dev/null || true

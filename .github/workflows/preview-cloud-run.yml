@@ -1,10 +1,32 @@
+# =============================================================================
+# REUSABLE WORKFLOW: PREVIEW CLOUD RUN
+# =============================================================================
+# Builds and deploys an ephemeral preview using Cloud Run traffic tags.
+# The preview shares staging infra (DB, secrets) but receives no live traffic.
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/preview-cloud-run.yml
+#
+# Required GitHub variables:
+#   Repository level : AR_REPO      (e.g. europe-west1-docker.pkg.dev/dogfy-host/docker)
+#   Environment "stg": GCP_PROJECT  (e.g. dogfy-platform-stg)
+#                      SA_EMAIL     (deployer SA for this service)
+#                      WIF_PROVIDER (WIF provider full resource name)
+#
+# Infra prerequisites:
+#   - Cloud Run service must have ingress = INGRESS_TRAFFIC_ALL (staging only)
+#     so the tagged URL https://pr-N---service.a.run.app is reachable.
+#   - Deployer SA needs roles/artifactregistry.writer on the AR_REPO project.
+#   - Cloud Run service agent needs roles/artifactregistry.reader on AR_REPO project.
+# =============================================================================
 name: Preview Cloud Run
+
 on:
   workflow_call:
     inputs:
       service:
         required: true
         type: string
+        description: "Cloud Run service name (must match Terraform, e.g. dogfy-new-help-center)"
       region:
         type: string
         default: "europe-west1"
@@ -17,15 +39,18 @@ on:
       build_args:
         type: string
         default: ""
+      # Prebuild steps (opt-in). Set these only if the Dockerfile expects
+      # pre-built artifacts (e.g. npm run build output) in the build context.
+      # If the Dockerfile is self-contained (multi-stage), leave empty.
       node_version:
         type: string
-        default: "22"
+        default: ""
       install_command:
         type: string
-        default: "npm ci"
+        default: ""
       build_command:
         type: string
-        default: "npm run build"
+        default: ""
     outputs:
       preview_url:
         value: ${{ jobs.preview.outputs.url }}
@@ -38,7 +63,7 @@ jobs:
       group: preview-${{ inputs.service }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     outputs:
-      url: ${{ steps.tag-url.outputs.url }}
+      url: ${{ steps.preview-url.outputs.url }}
     permissions:
       contents: read
       id-token: write
@@ -47,14 +72,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # -- Optional prebuild ------------------------------------------------
       - uses: actions/setup-node@v4
+        if: inputs.node_version != ''
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
 
-      - run: ${{ inputs.install_command }}
-      - run: ${{ inputs.build_command }}
+      - if: inputs.install_command != ''
+        run: ${{ inputs.install_command }}
 
+      - if: inputs.build_command != ''
+        run: ${{ inputs.build_command }}
+
+      # -- Auth (WIF) -------------------------------------------------------
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
@@ -63,18 +94,16 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
       - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
+      # -- Build & push to centralized AR -----------------------------------
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build & Push
-        id: build
-        uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
           push: true
           tags: |
-            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }}
-            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}
+            ${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}
           build-args: ${{ inputs.build_args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -82,17 +111,18 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
+      # -- Deploy as tagged revision (no traffic) ---------------------------
       - name: Deploy preview
         run: |
           gcloud run deploy ${{ inputs.service }} \
-            --image=${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }} \
+            --image=${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }} \
             --tag=pr-${{ github.event.pull_request.number }} \
             --no-traffic \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
 
       - name: Get preview URL
-        id: tag-url
+        id: preview-url
         run: |
           SERVICE_URL=$(gcloud run services describe ${{ inputs.service }} \
             --region=${{ inputs.region }} \
@@ -110,7 +140,7 @@ jobs:
             | | |
             |---|---|
             | Service | `${{ inputs.service }}` |
-            | URL | ${{ steps.tag-url.outputs.url }} |
+            | URL | ${{ steps.preview-url.outputs.url }} |
             | Commit | `${{ github.sha }}` |
 
-            > Preview shares staging DB and secrets. No production traffic.
+            > Preview shares staging infra (DB, secrets). No production traffic.

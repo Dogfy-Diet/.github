@@ -1,4 +1,29 @@
+# =============================================================================
+# REUSABLE WORKFLOW: DEPLOY CLOUD RUN
+# =============================================================================
+# Two modes, determined by the `version` input:
+#
+#   version=""     -> STAGING: build from source, push to AR, deploy
+#   version="v1.x" -> PRODUCTION: retag stg-latest in AR, deploy
+#
+# Centralized AR: same repository for stg and pro (e.g. dogfy-host/docker).
+# No cross-project image copy needed — promote is just a tag operation.
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml
+#
+# Required GitHub variables:
+#   Repository level : AR_REPO      (e.g. europe-west1-docker.pkg.dev/dogfy-host/docker)
+#   Per environment  : GCP_PROJECT  (e.g. dogfy-platform-stg / dogfy-platform-pro)
+#                      SA_EMAIL     (deployer SA for this service)
+#                      WIF_PROVIDER (WIF provider full resource name)
+#
+# Infra prerequisites:
+#   - Deployer SA needs roles/artifactregistry.writer on the AR_REPO project.
+#   - Cloud Run service agent needs roles/artifactregistry.reader on AR_REPO project.
+#   - Terraform owns all Cloud Run config; CI/CD only deploys images.
+# =============================================================================
 name: Deploy Cloud Run
+
 on:
   workflow_call:
     inputs:
@@ -9,11 +34,11 @@ on:
       service:
         required: true
         type: string
-        description: "Cloud Run service name (e.g. dogfy-new-help-center)"
+        description: "Cloud Run service name (must match Terraform)"
       version:
         type: string
         default: ""
-        description: "Semver tag for production (e.g. v1.4.0)"
+        description: "Semver tag for production promote (e.g. v1.4.0). Empty = build from source."
       region:
         type: string
         default: "europe-west1"
@@ -26,24 +51,19 @@ on:
       build_args:
         type: string
         default: ""
-        description: "Docker build args (e.g. NODE_VERSION=22)"
       node_version:
         type: string
-        default: "22"
+        default: ""
       install_command:
         type: string
-        default: "npm ci"
+        default: ""
       build_command:
         type: string
-        default: "npm run build"
-      promote_from:
-        type: string
         default: ""
-        description: "GCP project to promote image from (production only)"
       smoke_test_path:
         type: string
         default: ""
-        description: "Path for smoke test (e.g. /api/health)"
+        description: "Health check path (e.g. /api/health). Empty = skip."
     outputs:
       image:
         value: ${{ jobs.deploy.outputs.image }}
@@ -66,45 +86,57 @@ jobs:
       id-token: write
 
     steps:
+      # ================================================================
+      # SOURCE & PREBUILD (staging only — production skips all of this)
+      # ================================================================
       - uses: actions/checkout@v4
+        if: inputs.version == ''
 
       - uses: actions/setup-node@v4
-        if: inputs.promote_from == ''
+        if: inputs.version == '' && inputs.node_version != ''
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
 
-      - name: Install dependencies
-        if: inputs.promote_from == ''
+      - if: inputs.version == '' && inputs.install_command != ''
         run: ${{ inputs.install_command }}
 
-      - name: Build application
-        if: inputs.promote_from == ''
+      - if: inputs.version == '' && inputs.build_command != ''
         run: ${{ inputs.build_command }}
 
+      # ================================================================
+      # AUTH (both staging and production)
+      # ================================================================
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.SA_EMAIL }}
 
       - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
+      - if: inputs.version == ''
+        run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+
+      # ================================================================
+      # BUILD (staging: version is empty)
+      # ================================================================
       - uses: docker/setup-buildx-action@v3
-        if: inputs.promote_from == ''
+        if: inputs.version == ''
 
-      # ── Build (staging) ──────────────────────────────────────
+      - id: meta
+        if: inputs.version == ''
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Build & Push
-        id: build
-        if: inputs.promote_from == ''
-        uses: docker/build-push-action@v5
+        if: inputs.version == ''
+        uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
           push: true
           tags: |
-            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }}
-            ${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:stg-latest
+            ${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}
+            ${{ vars.AR_REPO }}/${{ inputs.service }}:stg-latest
           build-args: ${{ inputs.build_args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -112,33 +144,32 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      # ── Promote (production: reuse staging image) ────────────
+      # ================================================================
+      # PROMOTE (production: version is set)
+      # Same AR repo — just retag, no image copy needed.
+      # ================================================================
       - name: Promote image
-        id: promote
-        if: inputs.promote_from != ''
+        if: inputs.version != ''
         run: |
-          SRC="${{ inputs.region }}-docker.pkg.dev/${{ inputs.promote_from }}/docker/${{ inputs.service }}:stg-latest"
-          DST="${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}"
+          gcloud artifacts docker tags add \
+            "${{ vars.AR_REPO }}/${{ inputs.service }}:stg-latest" \
+            "${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
+          gcloud artifacts docker tags add \
+            "${{ vars.AR_REPO }}/${{ inputs.service }}:stg-latest" \
+            "${{ vars.AR_REPO }}/${{ inputs.service }}:pro-latest"
 
-          gcloud artifacts docker images copy "$SRC" "${DST}:${{ inputs.version }}" --quiet || {
-            docker pull "$SRC"
-            docker tag "$SRC" "${DST}:${{ inputs.version }}"
-            docker tag "$SRC" "${DST}:pro-latest"
-            docker push "${DST}:${{ inputs.version }}"
-            docker push "${DST}:pro-latest"
-          }
-          echo "image=${DST}:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-
+      # ================================================================
+      # RESOLVE IMAGE & DEPLOY
+      # ================================================================
       - name: Resolve image
         id: resolve
         run: |
-          if [ -n "${{ steps.promote.outputs.image }}" ]; then
-            echo "image=${{ steps.promote.outputs.image }}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            echo "image=${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Deploy (image only — Terraform manages all config) ───
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ inputs.service }} \
@@ -155,44 +186,53 @@ jobs:
             --format='value(status.url)')
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
 
-      # ── Cleanup preview tags (staging only) ──────────────────
+      # ================================================================
+      # CLEANUP PREVIEWS (staging only — remove stale pr-* traffic tags)
+      # ================================================================
       - name: Cleanup preview tags
         if: inputs.environment == 'stg'
         run: |
           TAGS=$(gcloud run services describe ${{ inputs.service }} \
             --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
-            --format='value(status.traffic.tag)' 2>/dev/null | grep "^pr-" || true)
+            --format='value(status.traffic.tag)' 2>/dev/null \
+            | tr ';' '\n' | grep "^pr-" || true)
           for TAG in $TAGS; do
+            echo "Removing traffic tag: $TAG"
             gcloud run services update-traffic ${{ inputs.service }} \
               --remove-tags="$TAG" \
               --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} || true
           done
 
-      # ── Smoke test ───────────────────────────────────────────
+      # ================================================================
+      # SMOKE TEST
+      # ================================================================
       - name: Smoke test
         if: inputs.smoke_test_path != ''
         run: |
           URL="${{ steps.url.outputs.url }}${{ inputs.smoke_test_path }}"
-          sleep 15
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3; do
+            sleep 5
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
             if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
               echo "Smoke test passed (HTTP $STATUS)"
               exit 0
             fi
             echo "Attempt $i: HTTP $STATUS"
-            sleep 10
           done
-          echo "Smoke test FAILED after 5 attempts"
+          echo "Smoke test FAILED after 3 attempts"
           exit 1
 
-      # ── Summary ──────────────────────────────────────────────
+      # ================================================================
+      # SUMMARY
+      # ================================================================
       - name: Summary
         if: always()
         run: |
-          echo "### Deploy: ${{ inputs.service }} → ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | \`${{ steps.resolve.outputs.image }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| URL | ${{ steps.url.outputs.url }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Version | ${{ inputs.version || 'staging' }} |" >> "$GITHUB_STEP_SUMMARY"
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### Deploy: ${{ inputs.service }} → ${{ inputs.environment }}
+          | | |
+          |---|---|
+          | Image | `${{ steps.resolve.outputs.image }}` |
+          | URL | ${{ steps.url.outputs.url }} |
+          | Version | ${{ inputs.version || 'staging' }} |
+          EOF

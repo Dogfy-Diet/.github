@@ -1,4 +1,17 @@
+# =============================================================================
+# REUSABLE WORKFLOW: ROLLBACK CLOUD RUN
+# =============================================================================
+# Deploys a previous version by tag (e.g. v1.3.2) from the centralized AR.
+# Protected by the "production" GitHub environment (approval gate).
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml
+#
+# Required GitHub variables:
+#   Repository level       : AR_REPO
+#   Environment "production": GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
+# =============================================================================
 name: Rollback Cloud Run
+
 on:
   workflow_call:
     inputs:
@@ -32,17 +45,19 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.SA_EMAIL }}
+
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Rollback
         run: |
-          IMAGE="${{ inputs.region }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/docker/${{ inputs.service }}:${{ inputs.version }}"
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
+          echo "Rolling back to: $IMAGE"
           gcloud run deploy ${{ inputs.service }} \
             --image="$IMAGE" \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
 
-      - name: Verify
+      - name: Smoke test
         if: inputs.smoke_test_path != ''
         run: |
           URL=$(gcloud run services describe ${{ inputs.service }} \
@@ -50,9 +65,17 @@ jobs:
             --format='value(status.url)')
           sleep 10
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${URL}${{ inputs.smoke_test_path }}")
-          echo "Rollback to ${{ inputs.version }} — HTTP $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+            echo "Rollback verified (HTTP $STATUS)"
+          else
+            echo "WARNING: Rollback smoke test returned HTTP $STATUS"
+            exit 1
+          fi
 
       - name: Summary
+        if: always()
         run: |
-          echo "### Rollback: ${{ inputs.service }} → ${{ inputs.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Triggered by @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### Rollback: ${{ inputs.service }} → ${{ inputs.version }}
+          Triggered by @${{ github.actor }}
+          EOF
