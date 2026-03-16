@@ -28,6 +28,10 @@ on:
       smoke_test_path:
         type: string
         default: ""
+      cdn_host:
+        type: string
+        default: ""
+        description: "Host to invalidate CDN cache for. Requires CDN_URL_MAP GitHub env variable. Empty = skip."
 
 jobs:
   rollback:
@@ -72,10 +76,20 @@ jobs:
             exit 1
           fi
 
+      - name: Invalidate CDN cache
+        if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache ${{ vars.CDN_URL_MAP }} \
+            --host="${{ inputs.cdn_host }}" \
+            --path="/*" \
+            --project=${{ vars.GCP_PROJECT }} \
+            --async
+
       - name: Summary
         if: always()
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ### Rollback: ${{ inputs.service }} → ${{ inputs.version }}
           Triggered by @${{ github.actor }}
+          | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
           EOF

@@ -64,6 +64,10 @@ on:
         type: string
         default: ""
         description: "Health check path (e.g. /api/health). Empty = skip."
+      cdn_host:
+        type: string
+        default: ""
+        description: "Host to invalidate CDN cache for (e.g. bo-mig.staging.dogfydiet.com). Requires CDN_URL_MAP GitHub env variable. Empty = skip."
     outputs:
       image:
         value: ${{ jobs.deploy.outputs.image }}
@@ -223,6 +227,18 @@ jobs:
           exit 1
 
       # ================================================================
+      # CDN INVALIDATION
+      # ================================================================
+      - name: Invalidate CDN cache
+        if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache ${{ vars.CDN_URL_MAP }} \
+            --host="${{ inputs.cdn_host }}" \
+            --path="/*" \
+            --project=${{ vars.GCP_PROJECT }} \
+            --async
+
+      # ================================================================
       # SUMMARY
       # ================================================================
       - name: Summary
@@ -235,4 +251,5 @@ jobs:
           | Image | `${{ steps.resolve.outputs.image }}` |
           | URL | ${{ steps.url.outputs.url }} |
           | Version | ${{ inputs.version || 'staging' }} |
+          | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
           EOF
