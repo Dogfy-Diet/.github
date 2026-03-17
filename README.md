@@ -39,7 +39,7 @@ Builds, pushes to Artifact Registry, and deploys to Cloud Run. Two modes:
 | `cdn_host` | no | `""` | Host for CDN invalidation. Requires `CDN_URL_MAP` env variable |
 | `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
 
-**Outputs:** `image`, `url`
+**Outputs:** `image` (tag reference), `digest` (immutable `sha256:...`), `url`
 
 **Required GitHub variables:**
 
@@ -183,6 +183,84 @@ chore: update deps          → no release
 **Outputs:** `released` (boolean), `version` (e.g. `1.4.0`)
 
 > The GitHub Release created by this workflow can trigger a production deploy via `on: release: types: [published]`.
+
+---
+
+### [`cleanup-ar-tags.yml`](.github/workflows/cleanup-ar-tags.yml)
+
+Removes old `sha-*` image tags from Artifact Registry and cleans up untagged images. Prevents unbounded tag accumulation from staging deploys.
+
+**Protected tags (never deleted):** `stg-latest`, `pro-latest`, `v*.*.*`, `buildcache`, `pr-*`
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `service` | yes | — | Image name in AR (e.g. `dogfy-backoffice`) |
+| `keep_last` | no | `10` | Number of recent `sha-*` tags to keep |
+| `sa_email` | no | `""` | Deployer SA email override for monorepos |
+| `region` | no | `europe-west1` | GCP region |
+
+**Call on a weekly schedule:**
+
+```yaml
+name: Cleanup AR
+on:
+  schedule:
+    - cron: "0 3 * * 0"  # Sundays at 3am
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  cleanup:
+    uses: Dogfy-Diet/.github/.github/workflows/cleanup-ar-tags.yml@main
+    with:
+      service: dogfy-backoffice
+```
+
+---
+
+## Docker Build & Tagging Strategy
+
+### Tags
+
+```
+{service}:sha-abc1234     ← immutable, per commit (human-readable reference)
+{service}:stg-latest      ← mutable, points to latest staging build
+{service}:v1.4.0          ← immutable, per release
+{service}:pro-latest      ← mutable, points to latest production
+{service}:pr-42           ← ephemeral, per PR (cleaned up on close)
+{service}:buildcache      ← cache layers (not a runnable image)
+```
+
+### Digest-based deployment
+
+Cloud Run deploys always use the **image digest** (e.g. `@sha256:abc123...`), not tags. Tags are mutable pointers that could theoretically be moved; digests are immutable hashes. This guarantees the exact image that was built/promoted is what runs in production.
+
+```
+Build & Push ──▶ tags: sha-abc1234, stg-latest
+                  outputs: digest sha256:abc123...
+                              │
+                              ▼
+Deploy ────────▶ --image={service}@sha256:abc123...  (digest, immutable)
+```
+
+### Registry cache
+
+Build cache is stored in AR (`{service}:buildcache`) instead of GitHub Actions cache. This removes the 10GB limit and enables cross-branch cache sharing.
+
+### Tag lifecycle
+
+| Tag | Created | Deleted | By |
+|-----|---------|---------|-----|
+| `sha-*` | Every staging deploy | Weekly cleanup (keep last 10) | `cleanup-ar-tags.yml` |
+| `stg-latest` | Every staging deploy | Never (overwritten) | `deploy-cloud-run.yml` |
+| `v*.*.*` | Every release promote | Never | `deploy-cloud-run.yml` |
+| `pro-latest` | Every release promote | Never (overwritten) | `deploy-cloud-run.yml` |
+| `pr-*` | Every PR push | On PR close | `cleanup-preview.yml` |
+| `buildcache` | Every build | Never (overwritten) | `deploy-cloud-run.yml` |
 
 ---
 

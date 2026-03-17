@@ -1,0 +1,123 @@
+# =============================================================================
+# REUSABLE WORKFLOW: CLEANUP AR TAGS
+# =============================================================================
+# Removes old sha-* image tags from Artifact Registry, keeping the most
+# recent N tags per service. Prevents unbounded tag accumulation.
+#
+# Call this on a weekly schedule from each repo.
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/cleanup-ar-tags.yml
+#
+# Required GitHub variables:
+#   Repository level : AR_REPO
+#   Environment "stg": SA_EMAIL (or pass sa_email input), WIF_PROVIDER
+#
+# Protected tags (never deleted):
+#   stg-latest, pro-latest, v*.*.*, buildcache
+# =============================================================================
+name: Cleanup AR Tags
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: "Image name in AR (e.g. dogfy-backoffice)"
+      keep_last:
+        type: number
+        default: 10
+        description: "Number of recent sha-* tags to keep"
+      sa_email:
+        type: string
+        default: ""
+        description: "Deployer SA email override. Defaults to vars.SA_EMAIL."
+      region:
+        type: string
+        default: "europe-west1"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: stg
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Cleanup old sha-* tags
+        run: |
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          KEEP=${{ inputs.keep_last }}
+
+          echo "Listing tags for $IMAGE ..."
+          # Get all tags, one per line
+          ALL_TAGS=$(gcloud artifacts docker tags list "$IMAGE" \
+            --format='value(tag)' 2>/dev/null || true)
+
+          if [ -z "$ALL_TAGS" ]; then
+            echo "No tags found"
+            exit 0
+          fi
+
+          # Filter only sha-* tags and sort (newest last by sha, not ideal but stable)
+          SHA_TAGS=$(echo "$ALL_TAGS" | grep '^sha-' | sort || true)
+          TOTAL=$(echo "$SHA_TAGS" | grep -c . || true)
+
+          if [ "$TOTAL" -le "$KEEP" ]; then
+            echo "Only $TOTAL sha-* tags found (keeping $KEEP) — nothing to delete"
+            exit 0
+          fi
+
+          # Delete oldest tags (all except last $KEEP)
+          DELETE_COUNT=$((TOTAL - KEEP))
+          TO_DELETE=$(echo "$SHA_TAGS" | head -n "$DELETE_COUNT")
+          DELETED=0
+
+          for TAG in $TO_DELETE; do
+            echo "Deleting: $TAG"
+            if gcloud artifacts docker tags delete "$IMAGE:$TAG" --quiet 2>/dev/null; then
+              DELETED=$((DELETED + 1))
+            fi
+          done
+
+          echo "Deleted $DELETED / $DELETE_COUNT sha-* tags (kept last $KEEP)"
+
+      - name: Cleanup untagged images
+        run: |
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+
+          echo "Checking for untagged images ..."
+          UNTAGGED=$(gcloud artifacts docker images list "$IMAGE" \
+            --include-tags --filter="tags=''" \
+            --format='value(version)' 2>/dev/null || true)
+
+          if [ -z "$UNTAGGED" ]; then
+            echo "No untagged images found"
+            exit 0
+          fi
+
+          COUNT=$(echo "$UNTAGGED" | grep -c . || true)
+          echo "Found $COUNT untagged images, deleting ..."
+
+          for VERSION in $UNTAGGED; do
+            gcloud artifacts docker images delete "$IMAGE@$VERSION" \
+              --quiet --delete-tags 2>/dev/null || true
+          done
+
+          echo "Cleaned up $COUNT untagged images"
+
+      - name: Summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ### AR Cleanup: ${{ inputs.service }}
+          Removed old `sha-*` tags and untagged images (kept last ${{ inputs.keep_last }}).
+          EOF

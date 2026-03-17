@@ -75,6 +75,8 @@ on:
     outputs:
       image:
         value: ${{ jobs.deploy.outputs.image }}
+      digest:
+        value: ${{ jobs.deploy.outputs.digest }}
       url:
         value: ${{ jobs.deploy.outputs.url }}
 
@@ -88,6 +90,7 @@ jobs:
       cancel-in-progress: false
     outputs:
       image: ${{ steps.resolve.outputs.image }}
+      digest: ${{ steps.resolve.outputs.digest }}
       url: ${{ steps.url.outputs.url }}
     permissions:
       contents: read
@@ -136,6 +139,7 @@ jobs:
         run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push
+        id: build
         if: inputs.version == ''
         uses: docker/build-push-action@v6
         with:
@@ -187,15 +191,22 @@ jobs:
         id: resolve
         run: |
           if [ -n "${{ inputs.version }}" ]; then
+            # Production: resolve digest from the version tag we just created
+            DIGEST=$(gcloud artifacts docker images describe \
+              "${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}" \
+              --format='value(image_summary.digest)')
             echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
+            # Staging: use digest from build step
+            DIGEST="${{ steps.build.outputs.digest }}"
             echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}" >> "$GITHUB_OUTPUT"
           fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ inputs.service }} \
-            --image=${{ steps.resolve.outputs.image }} \
+            --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.resolve.outputs.digest }} \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
 
@@ -280,6 +291,7 @@ jobs:
           | | |
           |---|---|
           | Image | `${{ steps.resolve.outputs.image }}` |
+          | Digest | `${{ steps.resolve.outputs.digest }}` |
           | URL | ${{ steps.url.outputs.url }} |
           | Version | ${{ inputs.version || 'staging' }} |
           | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
