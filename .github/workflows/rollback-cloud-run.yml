@@ -52,6 +52,17 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Verify version exists in AR
+        run: |
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
+          echo "Checking $IMAGE ..."
+          gcloud artifacts docker images describe "$IMAGE" \
+            --format='value(image_summary.digest)' > /dev/null || {
+            echo "::error::Version ${{ inputs.version }} not found in Artifact Registry"
+            exit 1
+          }
+          echo "Found: $IMAGE"
+
       - name: Rollback
         run: |
           IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
@@ -67,14 +78,17 @@ jobs:
           URL=$(gcloud run services describe ${{ inputs.service }} \
             --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
             --format='value(status.url)')
-          sleep 10
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${URL}${{ inputs.smoke_test_path }}")
-          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
-            echo "Rollback verified (HTTP $STATUS)"
-          else
-            echo "WARNING: Rollback smoke test returned HTTP $STATUS"
-            exit 1
-          fi
+          for i in 1 2 3; do
+            sleep 5
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${URL}${{ inputs.smoke_test_path }}")
+            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+              echo "Rollback verified (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS"
+          done
+          echo "WARNING: Rollback smoke test FAILED after 3 attempts"
+          exit 1
 
       - name: Invalidate CDN cache
         if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
@@ -90,6 +104,9 @@ jobs:
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ### Rollback: ${{ inputs.service }} → ${{ inputs.version }}
-          Triggered by @${{ github.actor }}
+          | | |
+          |---|---|
+          | Triggered by | @${{ github.actor }} |
+          | Image | `${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}` |
           | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
           EOF

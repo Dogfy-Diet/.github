@@ -43,13 +43,32 @@ jobs:
 
       - name: Remove traffic tag
         run: |
-          gcloud run services update-traffic ${{ inputs.service }} \
-            --remove-tags=pr-${{ github.event.pull_request.number }} \
+          TAG="pr-${{ github.event.pull_request.number }}"
+          echo "Removing Cloud Run traffic tag: $TAG"
+          if gcloud run services update-traffic ${{ inputs.service }} \
+            --remove-tags="$TAG" \
             --region=${{ inputs.region }} \
-            --project=${{ vars.GCP_PROJECT }} 2>/dev/null || true
+            --project=${{ vars.GCP_PROJECT }} 2>/dev/null; then
+            echo "Removed traffic tag $TAG"
+          else
+            echo "Traffic tag $TAG not found (already removed or never created)"
+          fi
 
       - name: Delete preview image tag
         run: |
-          gcloud artifacts docker tags delete \
-            "${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}" \
-            --quiet 2>/dev/null || true
+          TAG="pr-${{ github.event.pull_request.number }}"
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:$TAG"
+          echo "Deleting AR image tag: $IMAGE"
+          if gcloud artifacts docker tags delete "$IMAGE" --quiet 2>/dev/null; then
+            echo "Deleted image tag $TAG"
+          else
+            echo "Image tag $TAG not found (already deleted or never pushed)"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### Cleanup: ${{ inputs.service }} PR #${{ github.event.pull_request.number }}
+          Removed traffic tag and AR image tag for closed PR.
+          EOF

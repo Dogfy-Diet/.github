@@ -51,6 +51,10 @@ on:
       build_command:
         type: string
         default: ""
+      smoke_test_path:
+        type: string
+        default: ""
+        description: "Health check path for preview (e.g. /health). Empty = skip."
     outputs:
       preview_url:
         value: ${{ jobs.preview.outputs.url }}
@@ -130,6 +134,21 @@ jobs:
             --format='value(status.url)')
           URL=$(echo "$SERVICE_URL" | sed "s|https://|https://pr-${{ github.event.pull_request.number }}---|")
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test preview
+        if: inputs.smoke_test_path != ''
+        run: |
+          URL="${{ steps.preview-url.outputs.url }}${{ inputs.smoke_test_path }}"
+          for i in 1 2 3; do
+            sleep 5
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
+            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+              echo "Preview smoke test passed (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS"
+          done
+          echo "::warning::Preview smoke test failed (last HTTP $STATUS) — preview may need a moment to start"
 
       - name: Comment on PR
         uses: peter-evans/create-or-update-comment@v4

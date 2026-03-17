@@ -1,4 +1,13 @@
+# =============================================================================
+# REUSABLE WORKFLOW: VALIDATE
+# =============================================================================
+# Runs lint, typecheck, test, build, and security audit in parallel.
+# Each step is optional — pass an empty string to skip it.
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/validate.yml
+# =============================================================================
 name: Validate
+
 on:
   workflow_call:
     inputs:
@@ -11,15 +20,31 @@ on:
       lint_command:
         type: string
         default: "npm run lint"
+        description: "Lint command. Empty = skip."
+      typecheck_command:
+        type: string
+        default: ""
+        description: "Typecheck command (e.g. npm run typecheck, npx vue-tsc --noEmit). Empty = skip."
       test_command:
         type: string
         default: "npm test"
+        description: "Test command. Empty = skip."
       build_command:
         type: string
         default: "npm run build"
+        description: "Build command. Empty = skip."
+      audit_command:
+        type: string
+        default: "npm audit --audit-level=moderate"
+        description: "Security audit command. Empty = skip."
+      setup_command:
+        type: string
+        default: ""
+        description: "Pre-step command after install (e.g. npx nuxt prepare). Runs before lint/typecheck/test/build."
 
 jobs:
-  validate:
+  lint:
+    if: inputs.lint_command != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +53,61 @@ jobs:
           node-version: ${{ inputs.node_version }}
           cache: npm
       - run: ${{ inputs.install_command }}
+      - if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
       - run: ${{ inputs.lint_command }}
+
+  typecheck:
+    if: inputs.typecheck_command != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: ${{ inputs.install_command }}
+      - if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
+      - run: ${{ inputs.typecheck_command }}
+
+  test:
+    if: inputs.test_command != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: ${{ inputs.install_command }}
+      - if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
       - run: ${{ inputs.test_command }}
+
+  build:
+    if: inputs.build_command != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: ${{ inputs.install_command }}
+      - if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
       - run: ${{ inputs.build_command }}
+
+  audit:
+    if: inputs.audit_command != ''
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+      - run: ${{ inputs.install_command }}
+      - run: ${{ inputs.audit_command }}

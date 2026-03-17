@@ -163,6 +163,19 @@ jobs:
             "${{ vars.AR_REPO }}/${{ inputs.service }}:pro-latest"
 
       # ================================================================
+      # SAVE CURRENT REVISION (for auto-rollback if smoke test fails)
+      # ================================================================
+      - name: Save current revision
+        id: pre-deploy
+        run: |
+          REVISION=$(gcloud run revisions list \
+            --service=${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(name)' --limit=1 --sort-by='~creationTimestamp' 2>/dev/null || true)
+          echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+
+      # ================================================================
       # RESOLVE IMAGE & DEPLOY
       # ================================================================
       - name: Resolve image
@@ -211,6 +224,7 @@ jobs:
       # SMOKE TEST
       # ================================================================
       - name: Smoke test
+        id: smoke
         if: inputs.smoke_test_path != ''
         run: |
           URL="${{ steps.url.outputs.url }}${{ inputs.smoke_test_path }}"
@@ -225,6 +239,18 @@ jobs:
           done
           echo "Smoke test FAILED after 3 attempts"
           exit 1
+
+      # ================================================================
+      # AUTO-ROLLBACK (if smoke test failed and there was a previous revision)
+      # ================================================================
+      - name: Auto-rollback
+        if: failure() && steps.smoke.outcome == 'failure' && steps.pre-deploy.outputs.revision != ''
+        run: |
+          echo "::warning::Smoke test failed — rolling back to ${{ steps.pre-deploy.outputs.revision }}"
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --to-revisions=${{ steps.pre-deploy.outputs.revision }}=100 \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
 
       # ================================================================
       # CDN INVALIDATION
