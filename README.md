@@ -281,6 +281,78 @@ jobs:
       smoke_test_path: /health
 ```
 
+## Repo Setup Guide
+
+When onboarding a new repo to use these workflows, configure the following in **GitHub Settings → Secrets and variables → Actions**.
+
+### Repository Variables (Settings → Variables → New repository variable)
+
+These are shared across all environments in the repo.
+
+| Variable | Example | Used by |
+|----------|---------|---------|
+| `AR_REPO` | `europe-west1-docker.pkg.dev/dogfy-host/docker` | deploy, preview, cleanup |
+
+### Environments (Settings → Environments)
+
+Create one environment per deployment target. Each environment has its own variables.
+
+#### Environment: `stg`
+
+| Variable | Example | Used by |
+|----------|---------|---------|
+| `GCP_PROJECT` | `dogfy-platform-stg` | deploy, preview, cleanup, rollback |
+| `SA_EMAIL` | `my-service-deployer@dogfy-platform-stg.iam.gserviceaccount.com` | deploy, preview, cleanup |
+| `WIF_PROVIDER` | `projects/454974353730/locations/global/workloadIdentityPools/github-actions-pool/providers/github-oidc` | deploy, preview, cleanup |
+| `CDN_URL_MAP` | `platform-stg-lb-urlmap` | deploy (only if service uses CDN) |
+
+> No protection rules needed for staging.
+
+#### Environment: `production`
+
+| Variable | Example | Used by |
+|----------|---------|---------|
+| `GCP_PROJECT` | `dogfy-platform-pro` | deploy, rollback |
+| `SA_EMAIL` | `my-service-deployer@dogfy-platform-pro.iam.gserviceaccount.com` | deploy, rollback |
+| `WIF_PROVIDER` | *(same WIF provider — pool is centralized)* | deploy, rollback |
+| `CDN_URL_MAP` | `platform-pro-lb-urlmap` | deploy, rollback (only if CDN) |
+
+> Enable **Required reviewers** as protection rule for production deployments.
+
+### Quick Reference: Variable Scope
+
+```
+Repository (shared)
+├── AR_REPO = europe-west1-docker.pkg.dev/dogfy-host/docker
+│
+├── Environment: stg
+│   ├── GCP_PROJECT  = dogfy-platform-stg
+│   ├── SA_EMAIL     = {service}-deployer@dogfy-platform-stg.iam.gserviceaccount.com
+│   ├── WIF_PROVIDER = projects/454974353730/.../github-oidc
+│   └── CDN_URL_MAP  = platform-stg-lb-urlmap          (optional)
+│
+└── Environment: production
+    ├── GCP_PROJECT  = dogfy-platform-pro
+    ├── SA_EMAIL     = {service}-deployer@dogfy-platform-pro.iam.gserviceaccount.com
+    ├── WIF_PROVIDER = projects/454974353730/.../github-oidc
+    └── CDN_URL_MAP  = platform-pro-lb-urlmap           (optional)
+```
+
+### Caller Workflow Permissions
+
+Any caller workflow that uses these reusable workflows **must** declare permissions explicitly. This is a GitHub Actions requirement for `id-token: write` (WIF needs it).
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write  # only needed if using preview-cloud-run
+```
+
+> If the caller doesn't declare `id-token: write`, WIF auth will fail silently with a 403.
+
+---
+
 ## Infrastructure Prerequisites
 
 All workflows use **Workload Identity Federation** (WIF) — no service account keys.
