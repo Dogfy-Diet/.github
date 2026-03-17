@@ -154,6 +154,38 @@ Manual rollback to a previous version. Protected by the `production` GitHub envi
 
 ---
 
+### [`release.yml`](.github/workflows/release.yml)
+
+Automates semantic versioning, changelog, and GitHub Releases using [semantic-release](https://github.com/semantic-release/semantic-release). Analyzes conventional commits since the last tag to determine the version bump.
+
+```
+feat: add export button     → minor (1.x.0)
+fix: correct date parsing   → patch (1.0.x)
+feat!: redesign auth flow   → major (x.0.0)
+chore: update deps          → no release
+```
+
+**Features:**
+- Generates default config if repo has no `.releaserc*` file (zero config for most repos)
+- Respects existing `.releaserc.json` / `release.config.js` if present
+- CHANGELOG.md + package.json version bump committed to main (optional)
+- `[skip ci]` in release commit to avoid infinite loops
+- GitHub Release with auto-generated release notes
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `node_version` | no | `22` | Node.js version |
+| `commit_changelog` | no | `true` | Commit CHANGELOG.md + version bump to main. Set `false` if branch protection blocks direct pushes |
+| `extra_plugins` | no | `""` | Additional semantic-release plugins (space-separated npm packages) |
+
+**Outputs:** `released` (boolean), `version` (e.g. `1.4.0`)
+
+> The GitHub Release created by this workflow can trigger a production deploy via `on: release: types: [published]`.
+
+---
+
 ## Usage Examples
 
 ### Minimal: deploy on push to main
@@ -293,10 +325,26 @@ jobs:
       service: dogfy-my-service
 ```
 
-### Production promote + rollback
+### Release + production deploy + rollback
 
 ```yaml
-# deploy-production.yml
+# release.yml — runs on every merge to main, creates GitHub Release if needed
+name: Release
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  release:
+    uses: Dogfy-Diet/.github/.github/workflows/release.yml@main
+```
+
+```yaml
+# deploy-production.yml — triggered by GitHub Release, deploys to production
 name: Deploy Production
 on:
   release:
@@ -317,7 +365,7 @@ jobs:
 ```
 
 ```yaml
-# rollback.yml
+# rollback.yml — manual trigger for emergencies
 name: Rollback
 on:
   workflow_dispatch:
@@ -337,6 +385,30 @@ jobs:
       service: dogfy-my-service
       version: ${{ inputs.version }}
       smoke_test_path: /health
+```
+
+**Full lifecycle:**
+
+```
+push to main
+     │
+     ├──▶ deploy-cloud-run.yml (staging, automatic)
+     │
+     └──▶ release.yml
+              │
+              ├── no releasable commits → nothing happens
+              │
+              └── feat/fix found → GitHub Release v1.4.0
+                                         │
+                                         ▼
+                                  deploy-production.yml
+                                         │
+                                  ┌──────┴───────┐
+                                  │   Approval   │
+                                  │     gate     │
+                                  └──────┬───────┘
+                                         │
+                                  promote + deploy prod
 ```
 
 ## Repo Setup Guide

@@ -1,0 +1,145 @@
+# =============================================================================
+# REUSABLE WORKFLOW: RELEASE
+# =============================================================================
+# Automates semantic versioning, changelog generation, and GitHub releases.
+# Uses semantic-release with a standard plugin chain.
+#
+# If the repo has no .releaserc* or release.config.* file, generates a
+# default config automatically. Repos with custom configs are respected.
+#
+# Flow:
+#   1. Analyze commits since last tag (conventional commits)
+#   2. Determine version bump (major/minor/patch)
+#   3. Update CHANGELOG.md + package.json (optional, requires write to main)
+#   4. Create git tag + GitHub Release with release notes
+#
+# The GitHub Release can trigger a production deploy workflow via:
+#   on: release: types: [published]
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/release.yml
+#
+# Commit convention (Angular):
+#   feat: ...     → minor (1.x.0)
+#   fix: ...      → patch (1.0.x)
+#   feat!: ...    → major (x.0.0)
+#   BREAKING CHANGE in footer → major
+#   chore/docs/ci/refactor/test → no release
+# =============================================================================
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        type: string
+        default: "22"
+      commit_changelog:
+        type: boolean
+        default: true
+        description: "Commit CHANGELOG.md + package.json version bump to main. Set to false if branch protection blocks direct pushes."
+      extra_plugins:
+        type: string
+        default: ""
+        description: "Additional semantic-release plugins to install (space-separated npm package names)."
+    outputs:
+      released:
+        description: "Whether a new release was published"
+        value: ${{ jobs.release.outputs.released }}
+      version:
+        description: "The new release version (e.g. 1.4.0)"
+        value: ${{ jobs.release.outputs.version }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      released: ${{ steps.semantic.outputs.new_release_published }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install semantic-release
+        run: |
+          PLUGINS="semantic-release @semantic-release/changelog @semantic-release/git @semantic-release/github"
+          if [ -n "${{ inputs.extra_plugins }}" ]; then
+            PLUGINS="$PLUGINS ${{ inputs.extra_plugins }}"
+          fi
+          npm install -D $PLUGINS
+
+      - name: Generate default config
+        run: |
+          # Skip if repo already has a config
+          if [ -f .releaserc.json ] || [ -f .releaserc ] || [ -f .releaserc.yml ] || [ -f .releaserc.yaml ] || [ -f release.config.js ] || [ -f release.config.cjs ]; then
+            echo "Using existing semantic-release config"
+            exit 0
+          fi
+
+          if [ "${{ inputs.commit_changelog }}" = "true" ]; then
+            cat > .releaserc.json << 'RCEOF'
+          {
+            "branches": ["main"],
+            "plugins": [
+              "@semantic-release/commit-analyzer",
+              "@semantic-release/release-notes-generator",
+              "@semantic-release/changelog",
+              ["@semantic-release/npm", { "npmPublish": false }],
+              ["@semantic-release/git", {
+                "assets": ["CHANGELOG.md", "package.json", "package-lock.json"],
+                "message": "chore(release): v${nextRelease.version} [skip ci]"
+              }],
+              "@semantic-release/github"
+            ]
+          }
+          RCEOF
+          else
+            cat > .releaserc.json << 'RCEOF'
+          {
+            "branches": ["main"],
+            "plugins": [
+              "@semantic-release/commit-analyzer",
+              "@semantic-release/release-notes-generator",
+              "@semantic-release/github"
+            ]
+          }
+          RCEOF
+          fi
+          echo "Generated default .releaserc.json (commit_changelog=${{ inputs.commit_changelog }})"
+
+      - name: Run semantic-release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HUSKY: "0"
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: npx semantic-release
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "${{ steps.semantic.outputs.new_release_published }}" = "true" ]; then
+            cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ### Release v${{ steps.semantic.outputs.new_release_version }}
+          | | |
+          |---|---|
+          | Version | v${{ steps.semantic.outputs.new_release_version }} |
+          | Changelog committed | ${{ inputs.commit_changelog }} |
+          | Release | [GitHub Release](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.semantic.outputs.new_release_version }}) |
+          EOF
+          else
+            echo "### No release needed" >> "$GITHUB_STEP_SUMMARY"
+            echo "No releasable commits found since last tag." >> "$GITHUB_STEP_SUMMARY"
+          fi
