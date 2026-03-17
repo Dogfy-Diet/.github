@@ -113,8 +113,9 @@ jobs:
           tags: |
             ${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}
           build-args: ${{ inputs.build_args }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ vars.AR_REPO }}/${{ inputs.service }}:buildcache
+          cache-to: type=registry,ref=${{ vars.AR_REPO }}/${{ inputs.service }}:buildcache,mode=max
+          provenance: false
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
