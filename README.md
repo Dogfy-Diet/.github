@@ -57,12 +57,12 @@ Builds, pushes to Artifact Registry, and deploys to Cloud Run. Two modes:
 Runs lint, typecheck, test, build, and security audit **in parallel**. Each step is optional — pass an empty string to skip it.
 
 ```
-┌───────┐  ┌───────────┐  ┌──────┐  ┌───────┐  ┌───────┐
-│ lint  │  │ typecheck  │  │ test │  │ build │  │ audit │
-└───────┘  └───────────┘  └──────┘  └───────┘  └───────┘
-     ▲           ▲            ▲          ▲          ▲
-     └───────────┴────────────┴──────────┴──────────┘
-                         parallel
+┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
+│    lint    │  │ typecheck  │  │    test    │  │   build    │  │   audit    │
+└────────────┘  └────────────┘  └────────────┘  └────────────┘  └────────────┘
+       │               │               │              │               │
+       └───────────────┴───────────────┴──────────────┴───────────────┘
+                                  parallel
 ```
 
 **Inputs:**
