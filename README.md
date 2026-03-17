@@ -37,6 +37,7 @@ Builds, pushes to Artifact Registry, and deploys to Cloud Run. Two modes:
 | `build_command` | no | `""` | Build command for prebuild (e.g. `npm run build`) |
 | `smoke_test_path` | no | `""` | Health check path (e.g. `/health`). Empty = skip |
 | `cdn_host` | no | `""` | Host for CDN invalidation. Requires `CDN_URL_MAP` env variable |
+| `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
 
 **Outputs:** `image`, `url`
 
@@ -106,6 +107,7 @@ Deploys an ephemeral PR preview using Cloud Run traffic tags. The preview gets a
 | `install_command` | no | `""` | Install command for prebuild |
 | `build_command` | no | `""` | Build command for prebuild |
 | `smoke_test_path` | no | `""` | Health check path for preview |
+| `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
 
 **Output:** `preview_url`
 
@@ -123,6 +125,7 @@ Removes the Cloud Run traffic tag and AR image tag when a PR is closed. Without 
 |-------|----------|---------|-------------|
 | `service` | yes | — | Cloud Run service name |
 | `region` | no | `europe-west1` | GCP region |
+| `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
 
 **Trigger:** Call this from `on: pull_request: types: [closed]` in your caller workflow.
 
@@ -147,6 +150,7 @@ Manual rollback to a previous version. Protected by the `production` GitHub envi
 | `region` | no | `europe-west1` | GCP region |
 | `smoke_test_path` | no | `""` | Health check path |
 | `cdn_host` | no | `""` | Host for CDN invalidation |
+| `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
 
 ---
 
@@ -197,6 +201,60 @@ jobs:
         APP=backoffice
       smoke_test_path: /health
       cdn_host: bo.staging.dogfydiet.com
+```
+
+### Monorepo with multiple services
+
+Each service has its own deployer SA. Pass `sa_email` to target the right one — `vars.SA_EMAIL` can only hold one value per environment.
+
+```yaml
+# deploy-backoffice.yml
+name: Deploy Backoffice
+on:
+  push:
+    branches: [main]
+    paths: ["apps/backoffice/**", "packages/**", "Dockerfile", "nginx.conf", "entrypoint.sh"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-stg:
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    with:
+      environment: stg
+      service: dogfy-backoffice
+      sa_email: backoffice-deployer@dogfy-platform-stg.iam.gserviceaccount.com
+      build_args: |
+        APP=backoffice
+      smoke_test_path: /health
+      cdn_host: bo.staging.dogfydiet.com
+```
+
+```yaml
+# deploy-admin.yml — same repo, different service + SA
+name: Deploy Admin
+on:
+  push:
+    branches: [main]
+    paths: ["apps/admin/**", "packages/**", "Dockerfile", "nginx.conf", "entrypoint.sh"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-stg:
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    with:
+      environment: stg
+      service: dogfy-admin
+      sa_email: admin-deployer@dogfy-platform-stg.iam.gserviceaccount.com
+      build_args: |
+        APP=admin
+      smoke_test_path: /health
+      cdn_host: admin.staging.dogfydiet.com
 ```
 
 ### PR validation + preview + cleanup
@@ -307,6 +365,8 @@ Create one environment per deployment target. Each environment has its own varia
 | `CDN_URL_MAP` | `platform-stg-lb-urlmap` | deploy (only if service uses CDN) |
 
 > No protection rules needed for staging.
+>
+> **Monorepos:** `SA_EMAIL` can only hold one value. For repos with multiple services, leave `SA_EMAIL` empty (or set a default) and pass `sa_email` as input in each caller workflow instead.
 
 #### Environment: `production`
 

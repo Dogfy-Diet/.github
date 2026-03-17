@@ -55,6 +55,10 @@ on:
         type: string
         default: ""
         description: "Health check path for preview (e.g. /health). Empty = skip."
+      sa_email:
+        type: string
+        default: ""
+        description: "Deployer SA email. For monorepos with multiple services. Defaults to vars.SA_EMAIL if empty."
     outputs:
       preview_url:
         value: ${{ jobs.preview.outputs.url }}
@@ -93,7 +97,7 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.SA_EMAIL }}
+          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
 
       - uses: google-github-actions/setup-gcloud@v2
       - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet

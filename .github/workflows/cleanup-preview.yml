@@ -24,6 +24,10 @@ on:
       region:
         type: string
         default: "europe-west1"
+      sa_email:
+        type: string
+        default: ""
+        description: "Deployer SA email. For monorepos with multiple services. Defaults to vars.SA_EMAIL if empty."
 
 jobs:
   cleanup:
@@ -37,7 +41,7 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.SA_EMAIL }}
+          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
