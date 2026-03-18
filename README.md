@@ -78,8 +78,9 @@ Runs lint, typecheck, test, build, and security audit **in parallel**. Each step
 | `build_command` | `npm run build` | Build command. Empty = skip |
 | `audit_command` | `npm audit --audit-level=moderate` | Security audit. Empty = skip |
 | `setup_command` | `""` | Post-install prep (e.g. `npx nuxt prepare`). Runs before all jobs |
+| `lint_strict` | `true` | If `false`, lint failures are warnings (non-blocking). Useful for repos with pre-existing lint issues |
 
-> The `audit` job uses `continue-on-error: true` — it reports vulnerabilities but doesn't block the PR.
+> The `audit` job always uses `continue-on-error: true` — it reports vulnerabilities but doesn't block the PR. The `lint` job is strict by default but can be made non-blocking with `lint_strict: false`.
 
 ---
 
