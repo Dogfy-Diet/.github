@@ -213,11 +213,15 @@ jobs:
       - name: Get service URL
         id: url
         run: |
-          URL=$(gcloud run services describe ${{ inputs.service }} \
-            --region=${{ inputs.region }} \
-            --project=${{ vars.GCP_PROJECT }} \
-            --format='value(status.url)')
-          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.cdn_host }}" ]; then
+            echo "url=https://${{ inputs.cdn_host }}" >> "$GITHUB_OUTPUT"
+          else
+            URL=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.region }} \
+              --project=${{ vars.GCP_PROJECT }} \
+              --format='value(status.url)')
+            echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          fi
 
       # ================================================================
       # CLEANUP PREVIEWS (staging only — remove stale pr-* traffic tags)
