@@ -41,11 +41,16 @@ on:
         type: string
         default: ""
         description: "Pre-step command after install (e.g. npx nuxt prepare). Runs before lint/typecheck/test/build."
+      lint_strict:
+        type: boolean
+        default: true
+        description: "If false, lint failures are warnings (non-blocking). Useful for repos with pre-existing lint issues."
 
 jobs:
   lint:
     if: inputs.lint_command != ''
     runs-on: ubuntu-latest
+    continue-on-error: ${{ !inputs.lint_strict }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
