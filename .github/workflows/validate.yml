@@ -4,6 +4,9 @@
 # Runs lint, typecheck, test, build, and security audit in parallel.
 # Each step is optional — pass an empty string to skip it.
 #
+# Non-strict jobs (lint, audit) capture exit codes and report as warnings
+# instead of failing the workflow. The summary shows all results clearly.
+#
 # Destination: Dogfy-Diet/.github/.github/workflows/validate.yml
 # =============================================================================
 name: Validate
@@ -45,12 +48,17 @@ on:
         type: boolean
         default: true
         description: "If false, lint failures are warnings (non-blocking). Useful for repos with pre-existing lint issues."
+      audit_strict:
+        type: boolean
+        default: false
+        description: "If true, audit failures block the workflow. Default is non-blocking (warning only)."
 
 jobs:
   lint:
     if: inputs.lint_command != ''
     runs-on: ubuntu-latest
-    continue-on-error: ${{ !inputs.lint_strict }}
+    outputs:
+      status: ${{ steps.lint.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -60,11 +68,26 @@ jobs:
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
-      - run: ${{ inputs.lint_command }}
+      - name: Run lint
+        id: lint
+        run: |
+          if ${{ inputs.lint_command }}; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            if [ "${{ inputs.lint_strict }}" = "true" ]; then
+              echo "status=failure" >> "$GITHUB_OUTPUT"
+              exit 1
+            else
+              echo "::warning::Lint issues found (non-blocking)"
+              echo "status=warning" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
   typecheck:
     if: inputs.typecheck_command != ''
     runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.typecheck.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -74,11 +97,17 @@ jobs:
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
-      - run: ${{ inputs.typecheck_command }}
+      - name: Run typecheck
+        id: typecheck
+        run: |
+          ${{ inputs.typecheck_command }}
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
   test:
     if: inputs.test_command != ''
     runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.test.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -88,11 +117,17 @@ jobs:
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
-      - run: ${{ inputs.test_command }}
+      - name: Run tests
+        id: test
+        run: |
+          ${{ inputs.test_command }}
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
   build:
     if: inputs.build_command != ''
     runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.build.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -102,12 +137,17 @@ jobs:
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
-      - run: ${{ inputs.build_command }}
+      - name: Run build
+        id: build
+        run: |
+          ${{ inputs.build_command }}
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
   audit:
     if: inputs.audit_command != ''
     runs-on: ubuntu-latest
-    continue-on-error: true
+    outputs:
+      status: ${{ steps.audit.outputs.status }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -115,4 +155,91 @@ jobs:
           node-version: ${{ inputs.node_version }}
           cache: npm
       - run: ${{ inputs.install_command }}
-      - run: ${{ inputs.audit_command }}
+      - name: Run security audit
+        id: audit
+        run: |
+          if ${{ inputs.audit_command }}; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            if [ "${{ inputs.audit_strict }}" = "true" ]; then
+              echo "status=failure" >> "$GITHUB_OUTPUT"
+              exit 1
+            else
+              echo "::warning::Security vulnerabilities found (non-blocking)"
+              echo "status=warning" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  # ===========================================================================
+  # SUMMARY — aggregates results from all jobs
+  # ===========================================================================
+  summary:
+    if: always()
+    needs: [lint, typecheck, test, build, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validation summary
+        run: |
+          # Collect results
+          LINT="${{ needs.lint.outputs.status || 'skipped' }}"
+          TYPECHECK="${{ needs.typecheck.outputs.status || 'skipped' }}"
+          TEST="${{ needs.test.outputs.status || 'skipped' }}"
+          BUILD="${{ needs.build.outputs.status || 'skipped' }}"
+          AUDIT="${{ needs.audit.outputs.status || 'skipped' }}"
+
+          icon() {
+            case "$1" in
+              success) echo "✅" ;;
+              warning) echo "⚠️" ;;
+              failure) echo "❌" ;;
+              skipped) echo "⏭️" ;;
+              *)       echo "❓" ;;
+            esac
+          }
+
+          blocking() {
+            case "$1" in
+              lint)   [ "${{ inputs.lint_strict }}" = "true" ] && echo "Yes" || echo "No" ;;
+              audit)  [ "${{ inputs.audit_strict }}" = "true" ] && echo "Yes" || echo "No" ;;
+              *)      echo "Yes" ;;
+            esac
+          }
+
+          {
+            echo "## Validation Results"
+            echo ""
+            echo "| Check | Status | Blocking |"
+            echo "|-------|--------|----------|"
+            echo "| Lint | $(icon $LINT) ${LINT} | $(blocking lint) |"
+            echo "| Typecheck | $(icon $TYPECHECK) ${TYPECHECK} | $(blocking typecheck) |"
+            echo "| Tests | $(icon $TEST) ${TEST} | $(blocking test) |"
+            echo "| Build | $(icon $BUILD) ${BUILD} | $(blocking build) |"
+            echo "| Audit | $(icon $AUDIT) ${AUDIT} | $(blocking audit) |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Determine overall result
+          FAILED=0
+          WARNINGS=0
+
+          for job in typecheck test build; do
+            val=$(eval echo \$$( echo $job | tr '[:lower:]' '[:upper:]'))
+            if [ "$val" = "failure" ]; then
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          # Lint and audit only fail if strict
+          if [ "$LINT" = "failure" ]; then FAILED=$((FAILED + 1)); fi
+          if [ "$LINT" = "warning" ]; then WARNINGS=$((WARNINGS + 1)); fi
+          if [ "$AUDIT" = "failure" ]; then FAILED=$((FAILED + 1)); fi
+          if [ "$AUDIT" = "warning" ]; then WARNINGS=$((WARNINGS + 1)); fi
+
+          if [ $FAILED -gt 0 ]; then
+            echo "❌ **$FAILED check(s) failed.**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          elif [ $WARNINGS -gt 0 ]; then
+            echo "⚠️ **Passed with $WARNINGS warning(s).** Review when possible." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ **All checks passed.**" >> "$GITHUB_STEP_SUMMARY"
+          fi
