@@ -1,19 +1,19 @@
 # =============================================================================
-# REUSABLE WORKFLOW: DEPLOY CLOUD RUN
+# REUSABLE WORKFLOW: DEPLOY CLOUD RUN (STAGING)
 # =============================================================================
-# Two modes, determined by the `version` input:
+# Builds from source, pushes to AR, and deploys to Cloud Run.
+# Used for staging deployments triggered by pushes to main.
 #
-#   version=""     -> STAGING: build from source, push to AR, deploy
-#   version="v1.x" -> PRODUCTION: retag stg-latest in AR, deploy
+# For production promotes, use promote-cloud-run.yml instead.
 #
-# Centralized AR: same repository for stg and pro (e.g. dogfy-host/docker).
-# No cross-project image copy needed — promote is just a tag operation.
+# Centralized AR: images are pushed to dogfy-host/docker.
+# Tags created: sha-<7chars> (immutable) + stg-latest (mutable).
 #
 # Destination: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml
 #
 # Required GitHub variables:
 #   Repository level : AR_REPO      (e.g. europe-west1-docker.pkg.dev/dogfy-host/docker)
-#   Per environment  : GCP_PROJECT  (e.g. dogfy-platform-stg / dogfy-platform-pro)
+#   Per environment  : GCP_PROJECT  (e.g. dogfy-platform-stg)
 #                      SA_EMAIL     (deployer SA for this service)
 #                      WIF_PROVIDER (WIF provider full resource name)
 #
@@ -30,15 +30,11 @@ on:
       environment:
         required: true
         type: string
-        description: "GitHub environment (stg or production)"
+        description: "GitHub environment (e.g. stg)"
       service:
         required: true
         type: string
         description: "Cloud Run service name (must match Terraform)"
-      version:
-        type: string
-        default: ""
-        description: "Semver tag for production promote (e.g. v1.4.0). Empty = build from source."
       region:
         type: string
         default: "europe-west1"
@@ -67,7 +63,7 @@ on:
       cdn_host:
         type: string
         default: ""
-        description: "Host to invalidate CDN cache for (e.g. bo-mig.staging.dogfydiet.com). Requires CDN_URL_MAP GitHub env variable. Empty = skip."
+        description: "Host to invalidate CDN cache for. Requires CDN_URL_MAP GitHub env variable. Empty = skip."
       sa_email:
         type: string
         default: ""
@@ -95,28 +91,28 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      deployments: write
 
     steps:
       # ================================================================
-      # SOURCE & PREBUILD (staging only — production skips all of this)
+      # SOURCE & PREBUILD
       # ================================================================
       - uses: actions/checkout@v4
-        if: inputs.version == ''
 
       - uses: actions/setup-node@v4
-        if: inputs.version == '' && inputs.node_version != ''
+        if: inputs.node_version != ''
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
 
-      - if: inputs.version == '' && inputs.install_command != ''
+      - if: inputs.install_command != ''
         run: ${{ inputs.install_command }}
 
-      - if: inputs.version == '' && inputs.build_command != ''
+      - if: inputs.build_command != ''
         run: ${{ inputs.build_command }}
 
       # ================================================================
-      # AUTH (both staging and production)
+      # AUTH
       # ================================================================
       - uses: google-github-actions/auth@v2
         with:
@@ -125,22 +121,18 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - if: inputs.version == ''
-        run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+      - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
       # ================================================================
-      # BUILD (staging: version is empty)
+      # BUILD & PUSH
       # ================================================================
       - uses: docker/setup-buildx-action@v3
-        if: inputs.version == ''
 
       - id: meta
-        if: inputs.version == ''
         run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push
         id: build
-        if: inputs.version == ''
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
@@ -156,20 +148,6 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-
-      # ================================================================
-      # PROMOTE (production: version is set)
-      # Same AR repo — just retag, no image copy needed.
-      # ================================================================
-      - name: Promote image
-        if: inputs.version != ''
-        run: |
-          gcloud artifacts docker tags add \
-            "${{ vars.AR_REPO }}/${{ inputs.service }}:stg-latest" \
-            "${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
-          gcloud artifacts docker tags add \
-            "${{ vars.AR_REPO }}/${{ inputs.service }}:stg-latest" \
-            "${{ vars.AR_REPO }}/${{ inputs.service }}:pro-latest"
 
       # ================================================================
       # SAVE CURRENT REVISION (for auto-rollback if smoke test fails)
@@ -190,23 +168,13 @@ jobs:
       - name: Resolve image
         id: resolve
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            # Production: resolve digest from the version tag we just created
-            DIGEST=$(gcloud artifacts docker images describe \
-              "${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}" \
-              --format='value(image_summary.digest)')
-            echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            # Staging: use digest from build step
-            DIGEST="${{ steps.build.outputs.digest }}"
-            echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}" >> "$GITHUB_OUTPUT"
-          fi
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}" >> "$GITHUB_OUTPUT"
+          echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ inputs.service }} \
-            --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.resolve.outputs.digest }} \
+            --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.build.outputs.digest }} \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
 
@@ -224,10 +192,9 @@ jobs:
           fi
 
       # ================================================================
-      # CLEANUP PREVIEWS (staging only — remove stale pr-* traffic tags)
+      # CLEANUP PREVIEWS (remove stale pr-* traffic tags)
       # ================================================================
       - name: Cleanup preview tags
-        if: inputs.environment == 'stg'
         run: |
           TAGS=$(gcloud run services describe ${{ inputs.service }} \
             --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
@@ -285,6 +252,25 @@ jobs:
             --async
 
       # ================================================================
+      # REGISTER GITHUB DEPLOYMENT
+      # ================================================================
+      - name: Register deployment
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEPLOY_ID=$(gh api repos/${{ github.repository }}/deployments \
+            -f ref="${{ github.sha }}" \
+            -f environment="${{ inputs.environment }}" \
+            -f description="${{ inputs.service }} ${{ steps.resolve.outputs.image }}" \
+            -f auto_merge=false \
+            --jq '.id')
+          gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
+            -f state=success \
+            -f environment_url="${{ steps.url.outputs.url }}" \
+            -f description="Deployed ${{ steps.resolve.outputs.image }}"
+
+      # ================================================================
       # SUMMARY
       # ================================================================
       - name: Summary
@@ -297,6 +283,5 @@ jobs:
           | Image | `${{ steps.resolve.outputs.image }}` |
           | Digest | `${{ steps.resolve.outputs.digest }}` |
           | URL | ${{ steps.url.outputs.url }} |
-          | Version | ${{ inputs.version || 'staging' }} |
           | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
           EOF

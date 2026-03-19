@@ -1,0 +1,358 @@
+# =============================================================================
+# REUSABLE WORKFLOW: PROMOTE TO PRODUCTION
+# =============================================================================
+# Promotes an existing image from AR to production. No build — just tag + deploy.
+#
+# The version input accepts:
+#   - Commit hash (e.g. b075fa6 or full 40-char) → resolved to sha-* tag
+#   - Semver (v1.4.0 or 1.4.0) → created from stg-latest, for release-please callers
+#   - AR tag (sha-b075fa6, stg-latest, pro-previous) → used as-is
+#
+# Features:
+#   - Pre-deploy context: shows source vs production image comparison
+#   - Backup: tags current pro-latest as pro-previous before overwriting
+#   - Smoke test with auto-rollback on failure
+#   - CDN cache invalidation
+#   - GitHub Deployments API: registers each deploy for traceability
+#
+# For staging builds, use deploy-cloud-run.yml instead.
+#
+# Destination: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml
+#
+# Required GitHub variables:
+#   Repository level : AR_REPO      (e.g. europe-west1-docker.pkg.dev/dogfy-host/docker)
+#   Per environment  : GCP_PROJECT  (e.g. dogfy-platform-pro)
+#                      SA_EMAIL     (deployer SA for this service)
+#                      WIF_PROVIDER (WIF provider full resource name)
+# =============================================================================
+name: Promote to Production
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+        description: "Cloud Run service name (must match Terraform)"
+      version:
+        required: true
+        type: string
+        description: "Version to promote. Accepts: commit hash (b075fa6), semver (v1.4.0 or 1.4.0), tag (stg-latest, sha-b075fa6)."
+      environment:
+        type: string
+        default: "production"
+        description: "GitHub environment. Defaults to production."
+      region:
+        type: string
+        default: "europe-west1"
+      smoke_test_path:
+        type: string
+        default: ""
+        description: "Health check path (e.g. /health). Empty = skip."
+      cdn_host:
+        type: string
+        default: ""
+        description: "Host to invalidate CDN cache for. Requires CDN_URL_MAP GitHub env variable. Empty = skip."
+      sa_email:
+        type: string
+        default: ""
+        description: "Deployer SA email. For monorepos with multiple services. Defaults to vars.SA_EMAIL if empty."
+    outputs:
+      image:
+        value: ${{ jobs.promote.outputs.image }}
+      digest:
+        value: ${{ jobs.promote.outputs.digest }}
+      url:
+        value: ${{ jobs.promote.outputs.url }}
+
+jobs:
+  promote:
+    name: "Promote to ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.service }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      digest: ${{ steps.resolve.outputs.digest }}
+      url: ${{ steps.url.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+
+    steps:
+      # ================================================================
+      # AUTH
+      # ================================================================
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # ================================================================
+      # RESOLVE VERSION
+      # Normalizes user input → AR tag.
+      #   b075fa6 / b075fa6c3d9e...  → sha-b075fa6  (commit hash)
+      #   1.4.0                       → v1.4.0       (semver without v)
+      #   v1.4.0                      → v1.4.0       (semver with v)
+      #   sha-b075fa6                 → sha-b075fa6  (already a tag)
+      #   stg-latest / pro-previous   → as-is        (mutable tags)
+      # ================================================================
+      - name: Resolve version
+        id: version
+        run: |
+          RAW="${{ inputs.version }}"
+
+          if echo "$RAW" | grep -qE '^[0-9a-f]{7,40}$'; then
+            RESOLVED="sha-${RAW:0:7}"
+          elif echo "$RAW" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            RESOLVED="v${RAW}"
+          else
+            RESOLVED="$RAW"
+          fi
+
+          # Semver tags don't exist yet — they get created from stg-latest.
+          # Everything else (sha-*, stg-latest, pro-previous) already exists in AR.
+          if echo "$RESOLVED" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "is_semver=true" >> "$GITHUB_OUTPUT"
+            echo "source=stg-latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_semver=false" >> "$GITHUB_OUTPUT"
+            echo "source=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "tag=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${RAW} → ${RESOLVED}"
+
+      # ================================================================
+      # PRE-DEPLOY CONTEXT
+      # Shows source vs production comparison. Visible to approval reviewers.
+      # ================================================================
+      - name: Pre-deploy context
+        env:
+          AR_IMAGE: ${{ vars.AR_REPO }}/${{ inputs.service }}
+          SOURCE_TAG: ${{ steps.version.outputs.source }}
+        run: |
+          # Get source image info (what we're about to deploy)
+          SRC_DIGEST=$(gcloud artifacts docker images describe \
+            "${AR_IMAGE}:${SOURCE_TAG}" \
+            --format='value(image_summary.digest)' 2>/dev/null || echo "not found")
+
+          # Find the sha tag for the source image
+          SRC_SHA="${SOURCE_TAG}"
+          if [ "$SRC_DIGEST" != "not found" ]; then
+            for img in $(gcloud artifacts docker images list "${AR_IMAGE}" \
+              --include-tags --filter="digest=${SRC_DIGEST}" \
+              --format='value(tags)' 2>/dev/null); do
+              SHA_MATCH=$(echo "$img" | tr ',' '\n' | grep "^sha-" | head -1)
+              if [ -n "$SHA_MATCH" ]; then
+                SRC_SHA="$SHA_MATCH"
+                break
+              fi
+            done
+          fi
+
+          # Get current production image info
+          PRO_DIGEST=$(gcloud artifacts docker images describe \
+            "${AR_IMAGE}:pro-latest" \
+            --format='value(image_summary.digest)' 2>/dev/null || echo "not found")
+
+          PRO_SHA="(none)"
+          if [ "$PRO_DIGEST" != "not found" ]; then
+            for img in $(gcloud artifacts docker images list "${AR_IMAGE}" \
+              --include-tags --filter="digest=${PRO_DIGEST}" \
+              --format='value(tags)' 2>/dev/null); do
+              SHA_MATCH=$(echo "$img" | tr ',' '\n' | grep "^sha-" | head -1)
+              if [ -n "$SHA_MATCH" ]; then
+                PRO_SHA="$SHA_MATCH"
+                break
+              fi
+            done
+          fi
+
+          # Write summary
+          SYNC_STATUS=""
+          if [ "$SRC_DIGEST" = "$PRO_DIGEST" ] && [ "$SRC_DIGEST" != "not found" ]; then
+            SYNC_STATUS="| **Status** | Already in sync |"
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<CTXEOF
+          ### Pre-deploy Context
+          | Environment | Image Tag | Digest |
+          |---|---|---|
+          | Source | \`${SRC_SHA}\` | \`${SRC_DIGEST:0:19}...\` |
+          | Production | \`${PRO_SHA}\` | \`${PRO_DIGEST:0:19}...\` |
+
+          ${SYNC_STATUS}
+
+          **Promoting \`${SRC_SHA}\` → production** (replacing \`${PRO_SHA}\`)
+          CTXEOF
+
+      # ================================================================
+      # BACKUP pro-latest → pro-previous (safety net for instant rollback)
+      # ================================================================
+      - name: Backup pro-latest as pro-previous
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          if gcloud artifacts docker images describe "${AR_IMAGE}:pro-latest" &>/dev/null; then
+            echo "Backing up pro-latest → pro-previous"
+            gcloud artifacts docker tags add \
+              "${AR_IMAGE}:pro-latest" \
+              "${AR_IMAGE}:pro-previous"
+          else
+            echo "No existing pro-latest found, skipping backup"
+          fi
+
+      # ================================================================
+      # PROMOTE
+      # Semver (v1.4.0): create version tag from stg-latest + promote
+      # Everything else (sha-*, stg-latest): promote that specific image
+      # ================================================================
+      - name: Promote image
+        env:
+          RESOLVED_TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_TAG: ${{ steps.version.outputs.source }}
+          IS_SEMVER: ${{ steps.version.outputs.is_semver }}
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+
+          if [ "$IS_SEMVER" = "true" ]; then
+            # Semver: create immutable version tag from stg-latest, then promote
+            gcloud artifacts docker tags add "${AR_IMAGE}:stg-latest" "${AR_IMAGE}:${RESOLVED_TAG}"
+            gcloud artifacts docker tags add "${AR_IMAGE}:stg-latest" "${AR_IMAGE}:pro-latest"
+          else
+            # Existing tag: promote that specific image to pro-latest
+            gcloud artifacts docker tags add "${AR_IMAGE}:${SOURCE_TAG}" "${AR_IMAGE}:pro-latest"
+          fi
+
+      # ================================================================
+      # SAVE CURRENT REVISION (for auto-rollback if smoke test fails)
+      # ================================================================
+      - name: Save current revision
+        id: pre-deploy
+        run: |
+          REVISION=$(gcloud run revisions list \
+            --service=${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(name)' --limit=1 --sort-by='~creationTimestamp' 2>/dev/null || true)
+          echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+
+      # ================================================================
+      # RESOLVE IMAGE & DEPLOY
+      # ================================================================
+      - name: Resolve image
+        id: resolve
+        env:
+          RESOLVED_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${AR_IMAGE}:${RESOLVED_TAG}" \
+            --format='value(image_summary.digest)')
+          echo "image=${AR_IMAGE}:${RESOLVED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ inputs.service }} \
+            --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.resolve.outputs.digest }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+
+      - name: Get service URL
+        id: url
+        run: |
+          if [ -n "${{ inputs.cdn_host }}" ]; then
+            echo "url=https://${{ inputs.cdn_host }}" >> "$GITHUB_OUTPUT"
+          else
+            URL=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.region }} \
+              --project=${{ vars.GCP_PROJECT }} \
+              --format='value(status.url)')
+            echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ================================================================
+      # SMOKE TEST
+      # ================================================================
+      - name: Smoke test
+        id: smoke
+        if: inputs.smoke_test_path != ''
+        run: |
+          URL="${{ steps.url.outputs.url }}${{ inputs.smoke_test_path }}"
+          for i in 1 2 3; do
+            sleep 5
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
+            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+              echo "Smoke test passed (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS"
+          done
+          echo "Smoke test FAILED after 3 attempts"
+          exit 1
+
+      # ================================================================
+      # AUTO-ROLLBACK (if smoke test failed and there was a previous revision)
+      # ================================================================
+      - name: Auto-rollback
+        if: failure() && steps.smoke.outcome == 'failure' && steps.pre-deploy.outputs.revision != ''
+        run: |
+          echo "::warning::Smoke test failed — rolling back to ${{ steps.pre-deploy.outputs.revision }}"
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --to-revisions=${{ steps.pre-deploy.outputs.revision }}=100 \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+
+      # ================================================================
+      # CDN INVALIDATION
+      # ================================================================
+      - name: Invalidate CDN cache
+        if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache ${{ vars.CDN_URL_MAP }} \
+            --host="${{ inputs.cdn_host }}" \
+            --path="/*" \
+            --project=${{ vars.GCP_PROJECT }} \
+            --async
+
+      # ================================================================
+      # REGISTER GITHUB DEPLOYMENT
+      # ================================================================
+      - name: Register deployment
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEPLOY_ID=$(gh api repos/${{ github.repository }}/deployments \
+            -f ref="${{ github.sha }}" \
+            -f environment="${{ inputs.environment }}" \
+            -f description="${{ inputs.service }} ${{ steps.resolve.outputs.image }}" \
+            -f auto_merge=false \
+            --jq '.id')
+          gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
+            -f state=success \
+            -f environment_url="${{ steps.url.outputs.url }}" \
+            -f description="Deployed ${{ steps.resolve.outputs.image }}"
+
+      # ================================================================
+      # SUMMARY
+      # ================================================================
+      - name: Summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### Promote: ${{ inputs.service }} → ${{ inputs.environment }}
+          | | |
+          |---|---|
+          | Image | `${{ steps.resolve.outputs.image }}` |
+          | Digest | `${{ steps.resolve.outputs.digest }}` |
+          | URL | ${{ steps.url.outputs.url }} |
+          | Version | `${{ inputs.version }}` |
+          | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
+          EOF

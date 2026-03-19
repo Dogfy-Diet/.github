@@ -13,7 +13,7 @@
 #   Environment "stg": SA_EMAIL (or pass sa_email input), WIF_PROVIDER
 #
 # Protected tags (never deleted):
-#   stg-latest, pro-latest, v*.*.*, buildcache
+#   stg-latest, pro-latest, pro-previous, v*.*.*, buildcache
 # =============================================================================
 name: Cleanup AR Tags
 
