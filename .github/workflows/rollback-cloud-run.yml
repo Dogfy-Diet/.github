@@ -1,7 +1,12 @@
 # =============================================================================
 # REUSABLE WORKFLOW: ROLLBACK CLOUD RUN
 # =============================================================================
-# Deploys a previous version by tag (e.g. v1.3.2) from the centralized AR.
+# Two modes:
+#
+#   mode="previous" (default) → instant traffic shift to previous revision (~2s)
+#                                Falls back to pro-previous AR tag if no revision available
+#   mode="specific"           → deploy a specific image tag from AR
+#
 # Protected by the "production" GitHub environment (approval gate).
 #
 # Destination: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml
@@ -18,10 +23,14 @@ on:
       service:
         required: true
         type: string
-      version:
-        required: true
+      mode:
         type: string
-        description: "Version to rollback to (e.g. v1.3.2)"
+        default: "previous"
+        description: "'previous' = instant traffic shift to last revision, 'specific' = deploy a specific tag"
+      version:
+        type: string
+        default: ""
+        description: "Version to rollback to (only for mode=specific). Accepts: commit hash (b075fa6), semver (v1.3.2 or 1.3.2), or tag (sha-b075fa6, pro-previous)."
       region:
         type: string
         default: "europe-west1"
@@ -47,6 +56,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      deployments: write
 
     steps:
       - uses: google-github-actions/auth@v2
@@ -56,32 +66,165 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Verify version exists in AR
+      # ================================================================
+      # MODE: PREVIOUS — instant traffic shift
+      # ================================================================
+      - name: Get current and previous revisions
+        id: revisions
+        if: inputs.mode == 'previous'
         run: |
-          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
-          echo "Checking $IMAGE ..."
-          gcloud artifacts docker images describe "$IMAGE" \
-            --format='value(image_summary.digest)' > /dev/null || {
-            echo "::error::Version ${{ inputs.version }} not found in Artifact Registry"
-            exit 1
-          }
-          echo "Found: $IMAGE"
+          REVISIONS=$(gcloud run revisions list \
+            --service=${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(name)' --limit=2 --sort-by='~creationTimestamp' 2>/dev/null || true)
 
-      - name: Rollback
+          CURRENT=$(echo "$REVISIONS" | sed -n '1p')
+          PREVIOUS=$(echo "$REVISIONS" | sed -n '2p')
+
+          echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "previous=${PREVIOUS}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$PREVIOUS" ]; then
+            echo "Found previous revision: $PREVIOUS (current: $CURRENT)"
+          else
+            echo "No previous revision found, will fall back to pro-previous tag"
+          fi
+
+      - name: Rollback via traffic shift
+        id: traffic-shift
+        if: inputs.mode == 'previous' && steps.revisions.outputs.previous != ''
         run: |
-          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}"
-          echo "Rolling back to: $IMAGE"
+          echo "Shifting 100% traffic to ${{ steps.revisions.outputs.previous }}"
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --to-revisions=${{ steps.revisions.outputs.previous }}=100 \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+          echo "method=traffic-shift" >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<RBEOF
+          ### Rollback: ${{ inputs.service }} (traffic shift)
+          | | |
+          |---|---|
+          | From | \`${{ steps.revisions.outputs.current }}\` |
+          | To | \`${{ steps.revisions.outputs.previous }}\` |
+          | Method | Instant traffic shift |
+          RBEOF
+
+      - name: Fallback — deploy pro-previous from AR
+        id: fallback
+        if: inputs.mode == 'previous' && steps.revisions.outputs.previous == ''
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          echo "No previous revision — deploying from pro-previous tag"
+
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${AR_IMAGE}:pro-previous" \
+            --format='value(image_summary.digest)' 2>/dev/null || true)
+
+          if [ -z "$DIGEST" ]; then
+            echo "::error::No previous revision and no pro-previous tag found in AR. Cannot rollback."
+            exit 1
+          fi
+
+          echo "Deploying pro-previous (digest: ${DIGEST})"
           gcloud run deploy ${{ inputs.service }} \
-            --image="$IMAGE" \
+            --image="${AR_IMAGE}@${DIGEST}" \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
+          echo "method=ar-redeploy" >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<RBEOF
+          ### Rollback: ${{ inputs.service }} (AR redeploy)
+          | | |
+          |---|---|
+          | Tag | \`pro-previous\` |
+          | Digest | \`${DIGEST}\` |
+          | Method | Redeploy from Artifact Registry (no previous revision available) |
+          RBEOF
+
+      # ================================================================
+      # MODE: SPECIFIC — deploy a specific tag
+      # ================================================================
+      - name: Validate and resolve version
+        id: resolve-version
+        if: inputs.mode == 'specific'
+        run: |
+          RAW="${{ inputs.version }}"
+          if [ -z "$RAW" ]; then
+            echo "::error::mode=specific requires a version input (e.g. b075fa6, v1.3.2, or 1.3.2)"
+            exit 1
+          fi
+
+          # Normalize input → AR tag
+          #   b075fa6 / b075fa6c3d9e...  → sha-b075fa6  (commit hash)
+          #   1.3.2                       → v1.3.2       (semver without v)
+          #   v1.3.2                      → v1.3.2       (semver with v)
+          #   sha-b075fa6                 → sha-b075fa6  (already a tag)
+          #   pro-previous                → as-is        (mutable tag)
+          if echo "$RAW" | grep -qE '^[0-9a-f]{7,40}$'; then
+            RESOLVED="sha-${RAW:0:7}"
+          elif echo "$RAW" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            RESOLVED="v${RAW}"
+          else
+            RESOLVED="$RAW"
+          fi
+
+          echo "tag=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${RAW} → ${RESOLVED}"
+
+      - name: Verify version exists in AR
+        id: verify
+        if: inputs.mode == 'specific'
+        run: |
+          TAG="${{ steps.resolve-version.outputs.tag }}"
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:${TAG}"
+          echo "Checking $IMAGE ..."
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE" \
+            --format='value(image_summary.digest)' 2>/dev/null || true)
+
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Version ${TAG} not found in Artifact Registry"
+            exit 1
+          fi
+
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Found: $IMAGE (digest: ${DIGEST})"
+
+      - name: Deploy specific version
+        if: inputs.mode == 'specific'
+        env:
+          RESOLVED_TAG: ${{ steps.resolve-version.outputs.tag }}
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          echo "Rolling back to: ${RESOLVED_TAG}"
+          gcloud run deploy ${{ inputs.service }} \
+            --image="${AR_IMAGE}@${{ steps.verify.outputs.digest }}" \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
 
+          cat >> "$GITHUB_STEP_SUMMARY" <<RBEOF
+          ### Rollback: ${{ inputs.service }} (specific version)
+          | | |
+          |---|---|
+          | Tag | \`${RESOLVED_TAG}\` |
+          | Digest | \`${{ steps.verify.outputs.digest }}\` |
+          | Method | Deploy specific version from AR |
+          RBEOF
+
+      # ================================================================
+      # SMOKE TEST (both modes)
+      # ================================================================
       - name: Smoke test
         if: inputs.smoke_test_path != ''
         run: |
-          URL=$(gcloud run services describe ${{ inputs.service }} \
-            --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
-            --format='value(status.url)')
+          if [ -n "${{ inputs.cdn_host }}" ]; then
+            URL="https://${{ inputs.cdn_host }}"
+          else
+            URL=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
+              --format='value(status.url)')
+          fi
           for i in 1 2 3; do
             sleep 5
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${URL}${{ inputs.smoke_test_path }}")
@@ -94,6 +237,9 @@ jobs:
           echo "WARNING: Rollback smoke test FAILED after 3 attempts"
           exit 1
 
+      # ================================================================
+      # CDN INVALIDATION (both modes)
+      # ================================================================
       - name: Invalidate CDN cache
         if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
         run: |
@@ -103,14 +249,49 @@ jobs:
             --project=${{ vars.GCP_PROJECT }} \
             --async
 
+      # ================================================================
+      # REGISTER GITHUB DEPLOYMENT
+      # ================================================================
+      - name: Register deployment
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.cdn_host }}" ]; then
+            ENV_URL="https://${{ inputs.cdn_host }}"
+          else
+            ENV_URL=$(gcloud run services describe ${{ inputs.service }} \
+              --region=${{ inputs.region }} --project=${{ vars.GCP_PROJECT }} \
+              --format='value(status.url)')
+          fi
+
+          DESCRIPTION="Rollback ${{ inputs.service }} (mode=${{ inputs.mode }})"
+          if [ "${{ inputs.mode }}" = "specific" ]; then
+            DESCRIPTION="Rollback ${{ inputs.service }} to ${{ inputs.version }}"
+          fi
+
+          DEPLOY_ID=$(gh api repos/${{ github.repository }}/deployments \
+            -f ref="${{ github.sha }}" \
+            -f environment="production" \
+            -f description="${DESCRIPTION}" \
+            -f auto_merge=false \
+            --jq '.id')
+          gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
+            -f state=success \
+            -f environment_url="${ENV_URL}" \
+            -f description="${DESCRIPTION}"
+
+      # ================================================================
+      # FINAL SUMMARY
+      # ================================================================
       - name: Summary
         if: always()
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          ### Rollback: ${{ inputs.service }} → ${{ inputs.version }}
+          ---
           | | |
           |---|---|
           | Triggered by | @${{ github.actor }} |
-          | Image | `${{ vars.AR_REPO }}/${{ inputs.service }}:${{ inputs.version }}` |
+          | Mode | `${{ inputs.mode }}` |
           | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
           EOF
