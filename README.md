@@ -55,7 +55,7 @@ Builds, pushes to Artifact Registry, and deploys to Cloud Run. Two modes:
 
 ### [`validate.yml`](.github/workflows/validate.yml)
 
-Runs lint, typecheck, test, build, and security audit **in parallel**. Each step is optional — pass an empty string to skip it.
+Runs lint, typecheck, test, build, and security audit **in parallel**. Each check is optional (pass an empty string to skip) and configurable as strict or non-strict.
 
 ```
 ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
@@ -64,6 +64,10 @@ Runs lint, typecheck, test, build, and security audit **in parallel**. Each step
        │               │               │              │               │
        └───────────────┴───────────────┴──────────────┴───────────────┘
                                   parallel
+                                     │
+                              ┌──────┴──────┐
+                              │   summary   │
+                              └─────────────┘
 ```
 
 **Inputs:**
@@ -77,16 +81,55 @@ Runs lint, typecheck, test, build, and security audit **in parallel**. Each step
 | `test_command` | `npm test` | Test command. Empty = skip |
 | `build_command` | `npm run build` | Build command. Empty = skip |
 | `audit_command` | `npm audit --audit-level=moderate` | Security audit. Empty = skip |
-| `setup_command` | `""` | Post-install prep (e.g. `npx nuxt prepare`). Runs before all jobs |
-| `non_strict_checks` | `"audit"` | Comma-separated list of checks that are non-blocking (warning only). Options: `lint`, `typecheck`, `test`, `build`, `audit` |
+| `setup_command` | `""` | Post-install prep (e.g. `npx nuxt prepare`). Runs before all checks |
+| `non_strict_checks` | `"audit"` | Comma-separated list of non-blocking checks. Options: `lint`, `typecheck`, `test`, `build`, `audit` |
 
-Each check runs in its own parallel job. When a check fails:
-- **Strict (default):** the job fails and blocks the PR.
-- **Non-strict:** the job passes with a `::warning` annotation. The failure is reported in the summary but doesn't block.
+**Strict vs Non-strict:**
 
-A **summary job** aggregates results into a table showing each check's status and whether it's blocking. Checks that were skipped (empty command) don't appear in the summary.
+Each check captures its exit code and behaves based on whether it's in `non_strict_checks`:
 
-> **Example:** `non_strict_checks: "lint, audit"` makes lint and audit non-blocking while keeping typecheck, test, and build strict.
+| | Strict (default) | Non-strict |
+|---|---|---|
+| **Check passes** | Job green, status `success` | Job green, status `success` |
+| **Check fails** | Job red, status `failure`, **blocks PR** | Job green, `::warning` annotation, status `warning`, **does not block** |
+
+The **summary job** runs after all checks and produces a results table:
+
+```
+## Validation Results
+
+| Check | Status | Blocking |
+|-------|--------|----------|
+| Lint | ⚠️ warning | No |
+| Audit | ⚠️ warning | No |
+
+⚠️ Passed with 2 warning(s). Review when possible.
+```
+
+Only checks that actually ran appear in the table — skipped checks (empty command) are omitted.
+
+**Caller examples:**
+
+```yaml
+# Strict repo (new project, clean codebase) — all checks block
+validate:
+  uses: Dogfy-Diet/.github/.github/workflows/validate.yml@main
+  with:
+    typecheck_command: "npx vue-tsc --noEmit"
+    non_strict_checks: ""
+```
+
+```yaml
+# Legacy repo (pre-existing lint/audit issues) — lint and audit are warnings
+validate:
+  uses: Dogfy-Diet/.github/.github/workflows/validate.yml@main
+  with:
+    lint_command: "npm run lint"
+    test_command: ""
+    build_command: ""
+    audit_command: "npm audit --audit-level=high"
+    non_strict_checks: "lint, audit"
+```
 
 ---
 
@@ -394,6 +437,7 @@ jobs:
     with:
       typecheck_command: "npx vue-tsc --noEmit"
       audit_command: "npm audit --audit-level=high"
+      non_strict_checks: "lint, audit"
 
   preview:
     if: github.event.action != 'closed'
