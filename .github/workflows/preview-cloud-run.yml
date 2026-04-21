@@ -87,9 +87,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: ${{ inputs.submodules }}
-          token: ${{ secrets.submodules_token || github.token }}
+
+      # Fetch private submodules separately so the main checkout keeps using
+      # GITHUB_TOKEN and the PAT only authorizes the submodule fetch.
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
 
       # -- Optional prebuild ------------------------------------------------
       - uses: actions/setup-node@v4
