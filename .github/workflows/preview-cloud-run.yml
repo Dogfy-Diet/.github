@@ -63,6 +63,14 @@ on:
         type: string
         default: "false"
         description: "Fetch git submodules on checkout. 'true', 'recursive', or 'false'. For private submodules, also pass submodules_token."
+      cache_node_modules:
+        type: boolean
+        default: true
+        description: "Cache node_modules across runs (key = package-lock.json hash). Ignored if install_command is empty."
+      build_cache_path:
+        type: string
+        default: ""
+        description: "Directory to cache across runs for incremental builds (e.g. 'apps/website/.nuxt'). Keyed by service + PR number."
     secrets:
       submodules_token:
         required: false
@@ -110,8 +118,29 @@ jobs:
           node-version: ${{ inputs.node_version }}
           cache: npm
 
+      - name: Restore node_modules cache
+        if: inputs.install_command != '' && inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.service }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.service }}-
+
       - if: inputs.install_command != ''
         run: ${{ inputs.install_command }}
+
+      - name: Restore build cache
+        if: inputs.build_cache_path != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.build_cache_path }}
+          key: ${{ runner.os }}-build-${{ inputs.service }}-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ inputs.service }}-pr-${{ github.event.pull_request.number }}-
+            ${{ runner.os }}-build-${{ inputs.service }}-
 
       - if: inputs.build_command != ''
         run: ${{ inputs.build_command }}
