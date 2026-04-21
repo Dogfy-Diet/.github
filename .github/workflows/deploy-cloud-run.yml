@@ -162,6 +162,11 @@ jobs:
             ${{ runner.os }}-build-${{ inputs.service }}-
 
       - if: inputs.build_command != ''
+        env:
+          # Exposed for builds that need to fetch private resources (e.g.
+          # @nuxt/content's repository source pulling a private submodule).
+          # Reuses the same PAT the caller passes via `submodules_token`.
+          GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
         run: ${{ inputs.build_command }}
 
       # ================================================================
