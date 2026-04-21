@@ -67,6 +67,7 @@ on:
 
 jobs:
   lint:
+    name: Lint
     if: inputs.lint_command != ''
     runs-on: ubuntu-latest
     outputs:
@@ -122,6 +123,7 @@ jobs:
           fi
 
   typecheck:
+    name: Typecheck
     if: inputs.typecheck_command != ''
     runs-on: ubuntu-latest
     outputs:
@@ -177,6 +179,7 @@ jobs:
           fi
 
   test:
+    name: Test
     if: inputs.test_command != ''
     runs-on: ubuntu-latest
     outputs:
@@ -232,6 +235,7 @@ jobs:
           fi
 
   build:
+    name: Build
     if: inputs.build_command != ''
     runs-on: ubuntu-latest
     outputs:
@@ -287,6 +291,7 @@ jobs:
           fi
 
   audit:
+    name: Security audit
     if: inputs.audit_command != ''
     runs-on: ubuntu-latest
     outputs:
@@ -343,6 +348,7 @@ jobs:
   # SUMMARY — aggregates results, only shows checks that ran
   # ===========================================================================
   summary:
+    name: Summary
     if: always()
     needs: [lint, typecheck, test, build, audit]
     runs-on: ubuntu-latest

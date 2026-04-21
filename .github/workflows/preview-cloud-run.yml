@@ -81,6 +81,7 @@ on:
 
 jobs:
   preview:
+    name: "Deploy PR preview"
     runs-on: ubuntu-latest
     environment: stg
     concurrency:

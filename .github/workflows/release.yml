@@ -51,6 +51,7 @@ on:
 
 jobs:
   release:
+    name: Create release PR / tag
     runs-on: ubuntu-latest
     permissions:
       contents: write
