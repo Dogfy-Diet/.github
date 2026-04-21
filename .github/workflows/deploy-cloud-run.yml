@@ -68,6 +68,14 @@ on:
         type: string
         default: ""
         description: "Deployer SA email. For monorepos with multiple services. Defaults to vars.SA_EMAIL if empty."
+      submodules:
+        type: string
+        default: "false"
+        description: "Fetch git submodules on checkout. 'true', 'recursive', or 'false'. For private submodules, also pass submodules_token."
+    secrets:
+      submodules_token:
+        required: false
+        description: "PAT with read access to private submodule repos. Only needed when submodules live in private repos the GITHUB_TOKEN cannot reach."
     outputs:
       image:
         value: ${{ jobs.deploy.outputs.image }}
@@ -98,6 +106,9 @@ jobs:
       # SOURCE & PREBUILD
       # ================================================================
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ inputs.submodules }}
+          token: ${{ secrets.submodules_token || github.token }}
 
       - uses: actions/setup-node@v4
         if: inputs.node_version != ''

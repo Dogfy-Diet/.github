@@ -38,6 +38,13 @@ Builds, pushes to Artifact Registry, and deploys to Cloud Run. Two modes:
 | `smoke_test_path` | no | `""` | Health check path (e.g. `/health`). Empty = skip |
 | `cdn_host` | no | `""` | Host for CDN invalidation. Requires `CDN_URL_MAP` env variable |
 | `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
+| `submodules` | no | `"false"` | Fetch git submodules on checkout. `"true"`, `"recursive"`, or `"false"` |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `submodules_token` | no | PAT with read access to private submodule repos. Only needed when submodules live in private repos the `GITHUB_TOKEN` cannot reach |
 
 **Outputs:** `image` (tag reference), `digest` (immutable `sha256:...`), `url`
 
@@ -158,6 +165,13 @@ Deploys an ephemeral PR preview using Cloud Run traffic tags. The preview gets a
 | `build_command` | no | `""` | Build command for prebuild |
 | `smoke_test_path` | no | `""` | Health check path for preview |
 | `sa_email` | no | `""` | Deployer SA email override. For monorepos. Defaults to `vars.SA_EMAIL` |
+| `submodules` | no | `"false"` | Fetch git submodules on checkout. `"true"`, `"recursive"`, or `"false"` |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `submodules_token` | no | PAT with read access to private submodule repos. Only needed when submodules live in private repos the `GITHUB_TOKEN` cannot reach |
 
 **Output:** `preview_url`
 
