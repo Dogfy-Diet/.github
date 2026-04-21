@@ -38,6 +38,7 @@ on:
 
 jobs:
   cleanup:
+    name: "Prune stale AR tags"
     runs-on: ubuntu-latest
     environment: stg
     permissions:

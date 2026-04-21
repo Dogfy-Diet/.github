@@ -48,19 +48,58 @@ on:
         type: string
         default: "audit"
         description: "Comma-separated list of checks that are non-blocking (warning only). Options: lint, typecheck, test, build, audit. Default: 'audit'."
+      submodules:
+        type: string
+        default: "false"
+        description: "Fetch git submodules on checkout. 'true', 'recursive', or 'false'."
+      cache_node_modules:
+        type: boolean
+        default: true
+        description: "Cache node_modules across runs (key = package-lock.json hash)."
+      cache_service_name:
+        type: string
+        default: "default"
+        description: "Namespace for node_modules cache (useful for monorepos where multiple apps share this reusable)."
+    secrets:
+      submodules_token:
+        required: false
+        description: "PAT with read access to private submodule repos."
 
 jobs:
   lint:
+    name: Lint
     if: inputs.lint_command != ''
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
+      - name: Restore node_modules cache
+        if: inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -84,16 +123,39 @@ jobs:
           fi
 
   typecheck:
+    name: Typecheck
     if: inputs.typecheck_command != ''
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
+      - name: Restore node_modules cache
+        if: inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -117,16 +179,39 @@ jobs:
           fi
 
   test:
+    name: Test
     if: inputs.test_command != ''
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
+      - name: Restore node_modules cache
+        if: inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -150,16 +235,39 @@ jobs:
           fi
 
   build:
+    name: Build
     if: inputs.build_command != ''
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
+      - name: Restore node_modules cache
+        if: inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -183,16 +291,39 @@ jobs:
           fi
 
   audit:
+    name: Security audit
     if: inputs.audit_command != ''
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
+      - name: Restore node_modules cache
+        if: inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
       - run: ${{ inputs.install_command }}
       - name: Run security audit
         id: run
@@ -217,6 +348,7 @@ jobs:
   # SUMMARY — aggregates results, only shows checks that ran
   # ===========================================================================
   summary:
+    name: Summary
     if: always()
     needs: [lint, typecheck, test, build, audit]
     runs-on: ubuntu-latest

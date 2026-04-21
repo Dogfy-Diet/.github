@@ -68,6 +68,22 @@ on:
         type: string
         default: ""
         description: "Deployer SA email. For monorepos with multiple services. Defaults to vars.SA_EMAIL if empty."
+      submodules:
+        type: string
+        default: "false"
+        description: "Fetch git submodules on checkout. 'true', 'recursive', or 'false'. For private submodules, also pass submodules_token."
+      cache_node_modules:
+        type: boolean
+        default: true
+        description: "Cache node_modules across runs (key = package-lock.json hash). Ignored if install_command is empty."
+      build_cache_path:
+        type: string
+        default: ""
+        description: "Directory to cache across runs for incremental builds (e.g. 'apps/website/.nuxt'). Keyed by service + sha with restore-keys fallback. Empty = no build cache."
+    secrets:
+      submodules_token:
+        required: false
+        description: "PAT with read access to private submodule repos. Only needed when submodules live in private repos the GITHUB_TOKEN cannot reach."
     outputs:
       image:
         value: ${{ jobs.deploy.outputs.image }}
@@ -99,14 +115,51 @@ jobs:
       # ================================================================
       - uses: actions/checkout@v4
 
+      # Fetch private submodules separately so the main checkout keeps using
+      # GITHUB_TOKEN (scoped to this repo) and the PAT only authorizes the
+      # submodule fetch.
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+
       - uses: actions/setup-node@v4
         if: inputs.node_version != ''
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
 
+      - name: Restore node_modules cache
+        if: inputs.install_command != '' && inputs.cache_node_modules
+        id: nm-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.service }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.service }}-
+
       - if: inputs.install_command != ''
         run: ${{ inputs.install_command }}
+
+      - name: Restore build cache
+        if: inputs.build_cache_path != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.build_cache_path }}
+          key: ${{ runner.os }}-build-${{ inputs.service }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ inputs.service }}-
 
       - if: inputs.build_command != ''
         run: ${{ inputs.build_command }}
@@ -263,7 +316,7 @@ jobs:
             -f ref="${{ github.sha }}" \
             -f environment="${{ inputs.environment }}" \
             -f description="${{ inputs.service }} ${{ steps.resolve.outputs.image }}" \
-            -f auto_merge=false \
+            -F auto_merge=false \
             --jq '.id')
           gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
             -f state=success \

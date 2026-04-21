@@ -48,6 +48,7 @@ on:
 
 jobs:
   rollback:
+    name: "Rollback ${{ inputs.service }} on production"
     runs-on: ubuntu-latest
     environment: production
     concurrency:
