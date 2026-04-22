@@ -232,6 +232,7 @@ jobs:
 
           PR_NUMBER=$(echo "$PR_INFO" | cut -f1)
           PR_HEAD_SHA=$(echo "$PR_INFO" | cut -f2)
+          echo "Found PR #${PR_NUMBER}, head sha ${PR_HEAD_SHA}"
 
           if [ -z "$PR_NUMBER" ] || [ -z "$PR_HEAD_SHA" ]; then
             echo "reuse=false" >> "$GITHUB_OUTPUT"
@@ -243,9 +244,11 @@ jobs:
           # branch has been deleted (the commit and its tree stay
           # reachable by SHA).
           MERGE_TREE=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}" \
-            --jq '.commit.tree.sha' 2>/dev/null || true)
+            --jq '.commit.tree.sha' || true)
+          echo "MERGE_TREE=${MERGE_TREE:-<empty>}"
           PR_HEAD_TREE=$(gh api "repos/${{ github.repository }}/commits/${PR_HEAD_SHA}" \
-            --jq '.commit.tree.sha' 2>/dev/null || true)
+            --jq '.commit.tree.sha' || true)
+          echo "PR_HEAD_TREE=${PR_HEAD_TREE:-<empty>}"
 
           if [ -z "$MERGE_TREE" ] || [ -z "$PR_HEAD_TREE" ] || [ "$MERGE_TREE" != "$PR_HEAD_TREE" ]; then
             echo "reuse=false" >> "$GITHUB_OUTPUT"
