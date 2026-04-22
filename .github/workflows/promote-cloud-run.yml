@@ -328,16 +328,23 @@ jobs:
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DESCRIPTION: "${{ inputs.service }} ${{ steps.resolve.outputs.image }}"
+          ENVIRONMENT_URL: ${{ steps.url.outputs.url }}
         run: |
-          DEPLOY_ID=$(gh api repos/${{ github.repository }}/deployments \
-            -f ref="${{ github.sha }}" \
-            -f environment="${{ inputs.environment }}" \
-            -f description="${{ inputs.service }} ${{ steps.resolve.outputs.image }}" \
-            -f auto_merge=false \
-            --jq '.id')
+          # required_contexts: [] so the promote isn't blocked by unrelated
+          # commit status checks on the target SHA. gh api's -f/-F can't encode
+          # an empty JSON array, so build the body with jq and feed via --input.
+          DEPLOY_ID=$(jq -n \
+            --arg ref "$REF" \
+            --arg env "$ENVIRONMENT" \
+            --arg desc "$DESCRIPTION" \
+            '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: []}' \
+            | gh api repos/${{ github.repository }}/deployments --input - --jq '.id')
           gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
             -f state=success \
-            -f environment_url="${{ steps.url.outputs.url }}" \
+            -f environment_url="$ENVIRONMENT_URL" \
             -f description="Deployed ${{ steps.resolve.outputs.image }}"
 
       # ================================================================
