@@ -226,16 +226,24 @@ jobs:
             exit 0
           fi
 
-          PR_DATA=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
-            --jq '.[0] // empty' 2>/dev/null || true)
-          if [ -z "$PR_DATA" ]; then
+          # Use --jq directly (re-piping gh output through jq fails on
+          # embedded control chars in large response bodies).
+          PR_INFO=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '.[0] | "\(.number)\t\(.head.sha)"' 2>/dev/null || true)
+          if [ -z "$PR_INFO" ]; then
             echo "reuse=false" >> "$GITHUB_OUTPUT"
             echo "No PR associated with commit ${{ github.sha }}"
             exit 0
           fi
 
-          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
-          PR_HEAD_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
+          PR_NUMBER=$(echo "$PR_INFO" | cut -f1)
+          PR_HEAD_SHA=$(echo "$PR_INFO" | cut -f2)
+
+          if [ -z "$PR_NUMBER" ] || [ -z "$PR_HEAD_SHA" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "PR response missing number or head.sha"
+            exit 0
+          fi
 
           # Read tree hashes from the API — this works even if the PR
           # branch has been deleted (the commit and its tree stay
