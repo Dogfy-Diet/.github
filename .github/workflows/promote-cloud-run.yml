@@ -250,10 +250,15 @@ jobs:
       # ================================================================
       - name: Deploy to Cloud Run
         run: |
+          # --traffic LATEST=100 explicitly routes traffic to the newly
+          # deployed revision. Without it, if a previous auto-rollback
+          # pinned traffic to an older revision, subsequent deploys
+          # silently create revisions that never serve traffic.
           gcloud run deploy ${{ inputs.service }} \
             --image=${{ steps.src.outputs.ar_image }}@${{ steps.src.outputs.digest }} \
             --region=${{ inputs.region }} \
-            --project=${{ vars.GCP_PROJECT }}
+            --project=${{ vars.GCP_PROJECT }} \
+            --traffic LATEST=100
 
       - name: Get service URL
         id: url
