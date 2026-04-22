@@ -119,78 +119,15 @@ jobs:
 
     steps:
       # ================================================================
-      # SOURCE & PREBUILD
+      # SOURCE
       # ================================================================
       - uses: actions/checkout@v4
 
-      # Fetch private submodules separately so the main checkout keeps using
-      # GITHUB_TOKEN (scoped to this repo) and the PAT only authorizes the
-      # submodule fetch.
-      - name: Fetch submodules
-        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
-        env:
-          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
-        run: |
-          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
-          if [ "${{ inputs.submodules }}" = "recursive" ]; then
-            git submodule update --init --recursive
-          else
-            git submodule update --init
-          fi
-          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
-
-      - uses: actions/setup-node@v4
-        if: inputs.node_version != ''
-        with:
-          node-version: ${{ inputs.node_version }}
-          cache: npm
-
-      - name: Restore node_modules cache
-        if: inputs.install_command != '' && inputs.cache_node_modules
-        id: nm-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            node_modules
-            **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.service }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.service }}-
-
-      - name: Load app-specific env vars
-        if: inputs.env_vars != ''
-        run: |
-          while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            case "$line" in \#*) continue ;; esac
-            echo "$line" >> "$GITHUB_ENV"
-          done <<< "${{ inputs.env_vars }}"
-
-      - if: inputs.install_command != ''
-        run: ${{ inputs.install_command }}
-
-      # Build cache is keyed strictly by commit SHA with NO restore-keys
-      # fallback. A fallback match from a different SHA restored stale Nuxt
-      # .nuxt/dist chunks that didn't get re-emitted on incremental builds
-      # (observed with lang JSON changes baked into cached i18n chunks).
-      # Cold build on first run of a SHA is a fair trade for correctness.
-      - name: Restore build cache
-        if: inputs.build_cache_path != ''
-        uses: actions/cache@v4
-        with:
-          path: ${{ inputs.build_cache_path }}
-          key: ${{ runner.os }}-build-${{ inputs.service }}-${{ github.sha }}
-
-      - if: inputs.build_command != ''
-        env:
-          # Exposed for builds that need to fetch private resources (e.g.
-          # @nuxt/content's repository source pulling a private submodule).
-          # Reuses the same PAT the caller passes via `submodules_token`.
-          GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
-        run: ${{ inputs.build_command }}
+      - id: meta
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       # ================================================================
-      # AUTH
+      # AUTH — run early so the preview-reuse check can query AR.
       # ================================================================
       - uses: google-github-actions/auth@v2
         with:
@@ -198,14 +135,6 @@ jobs:
           service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
 
       - uses: google-github-actions/setup-gcloud@v2
-
-      - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
-
-      # ================================================================
-      # BUILD & PUSH
-      # ================================================================
-      - id: meta
-        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       # ================================================================
       # PREVIEW-IMAGE REUSE
@@ -269,6 +198,79 @@ jobs:
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "✓ Reusing preview image from PR #${PR_NUMBER} (${DIGEST})"
+
+      # ================================================================
+      # PREBUILD — skipped entirely when we are reusing the preview image,
+      # since the preview already contains the built artefact (Nuxt
+      # .output/ in the Docker image). Running these on reuse=true is
+      # wasted runner time.
+      # ================================================================
+      - name: Fetch submodules
+        if: steps.preview-reuse.outputs.reuse != 'true' && (inputs.submodules == 'true' || inputs.submodules == 'recursive')
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+
+      - uses: actions/setup-node@v4
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.node_version != ''
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Restore node_modules cache
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.install_command != '' && inputs.cache_node_modules
+        id: nm-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.service }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.service }}-
+
+      - name: Load app-specific env vars
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
+
+      - if: steps.preview-reuse.outputs.reuse != 'true' && inputs.install_command != ''
+        run: ${{ inputs.install_command }}
+
+      # Build cache is keyed strictly by commit SHA with NO restore-keys
+      # fallback. A fallback match from a different SHA restored stale Nuxt
+      # .nuxt/dist chunks that didn't get re-emitted on incremental builds
+      # (observed with lang JSON changes baked into cached i18n chunks).
+      # Cold build on first run of a SHA is a fair trade for correctness.
+      - name: Restore build cache
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.build_cache_path != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.build_cache_path }}
+          key: ${{ runner.os }}-build-${{ inputs.service }}-${{ github.sha }}
+
+      - if: steps.preview-reuse.outputs.reuse != 'true' && inputs.build_command != ''
+        env:
+          # Exposed for builds that need to fetch private resources (e.g.
+          # @nuxt/content's repository source pulling a private submodule).
+          # Reuses the same PAT the caller passes via `submodules_token`.
+          GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.build_command }}
+
+      - name: Configure Docker auth
+        if: steps.preview-reuse.outputs.reuse != 'true'
+        run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
       - uses: docker/setup-buildx-action@v3
         if: steps.preview-reuse.outputs.reuse != 'true'
