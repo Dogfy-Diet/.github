@@ -335,10 +335,10 @@ jobs:
             --project=${{ vars.GCP_PROJECT }}
 
       # ================================================================
-      # CDN INVALIDATION
+      # CDN INVALIDATION — only on success
       # ================================================================
       - name: Invalidate CDN cache
-        if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
+        if: success() && inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
         run: |
           gcloud compute url-maps invalidate-cdn-cache ${{ vars.CDN_URL_MAP }} \
             --host="${{ inputs.cdn_host }}" \

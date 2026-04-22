@@ -7,13 +7,15 @@
 #                                Falls back to pro-previous AR tag if no revision available
 #   mode="specific"           → deploy a specific image tag from AR
 #
-# Protected by the "production" GitHub environment (approval gate).
+# Protected by a GitHub environment (approval gate). The environment name
+# is passed via `inputs.environment` (default: "production") so repos that
+# use e.g. "pro" can override without creating a duplicate environment.
 #
 # Destination: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml
 #
-# Required GitHub variables:
-#   Repository level       : AR_REPO
-#   Environment "production": GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
+# Required GitHub variables (on the chosen environment):
+#   Repository level : AR_REPO
+#   Per environment  : GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
 # =============================================================================
 name: Rollback Cloud Run
 
@@ -23,6 +25,10 @@ on:
       service:
         required: true
         type: string
+      environment:
+        type: string
+        default: "production"
+        description: "GitHub environment (e.g. pro). Must match the environment where GCP_PROJECT / SA_EMAIL / WIF_PROVIDER / CDN_URL_MAP are declared."
       mode:
         type: string
         default: "previous"
@@ -48,11 +54,11 @@ on:
 
 jobs:
   rollback:
-    name: "Rollback ${{ inputs.service }} on production"
+    name: "Rollback ${{ inputs.service }} on ${{ inputs.environment }}"
     runs-on: ubuntu-latest
-    environment: production
+    environment: ${{ inputs.environment }}
     concurrency:
-      group: deploy-${{ inputs.service }}-production
+      group: deploy-${{ inputs.service }}-${{ inputs.environment }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -69,19 +75,47 @@ jobs:
 
       # ================================================================
       # MODE: PREVIOUS — instant traffic shift
+      # CURRENT  = revision serving 100% of untagged (production) traffic.
+      # PREVIOUS = newest revision that is neither CURRENT nor currently
+      #            pointed to by a tagged traffic entry (pr-* previews).
+      # Without this filter, a leftover preview revision (--no-traffic,
+      # tagged) would be the "newest", and rolling back traffic to it
+      # would serve whatever the preview had.
       # ================================================================
       - name: Get current and previous revisions
         id: revisions
         if: inputs.mode == 'previous'
         run: |
-          REVISIONS=$(gcloud run revisions list \
+          SERVICE_JSON=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='json' 2>/dev/null || echo '{}')
+
+          CURRENT=$(echo "$SERVICE_JSON" \
+            | jq -r '.status.traffic[] | select(.percent==100 and (.tag == null or .tag == "")) | .revisionName' \
+            | head -1)
+
+          # Revisions currently tagged (previews) — exclude them as candidates
+          TAGGED=$(echo "$SERVICE_JSON" \
+            | jq -r '.status.traffic[] | select(.tag != null and .tag != "") | .revisionName')
+
+          # Walk revisions newest-first; first one that is neither CURRENT
+          # nor TAGGED is our rollback target.
+          PREVIOUS=""
+          while IFS= read -r rev; do
+            [ -z "$rev" ] && continue
+            [ "$rev" = "$CURRENT" ] && continue
+            if [ -n "$TAGGED" ] && printf '%s\n' "$TAGGED" | grep -qxF "$rev"; then
+              continue
+            fi
+            PREVIOUS="$rev"
+            break
+          done < <(gcloud run revisions list \
             --service=${{ inputs.service }} \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }} \
-            --format='value(name)' --limit=2 --sort-by='~creationTimestamp' 2>/dev/null || true)
-
-          CURRENT=$(echo "$REVISIONS" | sed -n '1p')
-          PREVIOUS=$(echo "$REVISIONS" | sed -n '2p')
+            --format='value(metadata.name)' \
+            --sort-by='~metadata.creationTimestamp' 2>/dev/null || true)
 
           echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
           echo "previous=${PREVIOUS}" >> "$GITHUB_OUTPUT"
@@ -239,10 +273,10 @@ jobs:
           exit 1
 
       # ================================================================
-      # CDN INVALIDATION (both modes)
+      # CDN INVALIDATION (both modes) — only on success
       # ================================================================
       - name: Invalidate CDN cache
-        if: inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
+        if: success() && inputs.cdn_host != '' && vars.CDN_URL_MAP != ''
         run: |
           gcloud compute url-maps invalidate-cdn-cache ${{ vars.CDN_URL_MAP }} \
             --host="${{ inputs.cdn_host }}" \
@@ -277,7 +311,7 @@ jobs:
           # array — build the body with jq and feed via --input.
           DEPLOY_ID=$(jq -n \
             --arg ref "$REF" \
-            --arg env "production" \
+            --arg env "${{ inputs.environment }}" \
             --arg desc "$DESCRIPTION" \
             '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: []}' \
             | gh api repos/${{ github.repository }}/deployments --input - --jq '.id')
