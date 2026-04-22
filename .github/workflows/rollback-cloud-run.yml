@@ -227,6 +227,7 @@ jobs:
           echo "Found: $IMAGE (digest: ${DIGEST})"
 
       - name: Deploy specific version
+        id: specific-deploy
         if: inputs.mode == 'specific'
         env:
           RESOLVED_TAG: ${{ steps.resolve-version.outputs.tag }}
@@ -246,6 +247,19 @@ jobs:
           | Digest | \`${{ steps.verify.outputs.digest }}\` |
           | Method | Deploy specific version from AR |
           RBEOF
+
+      # `gcloud run deploy` does not shift traffic when the service already
+      # has an explicit split (which is exactly the state left by a prior
+      # auto-rollback or manual pin). Both the specific-mode deploy above
+      # and the fallback AR redeploy below create a new revision that
+      # silently receives 0% traffic unless we explicitly route to latest.
+      - name: Route traffic to latest revision
+        if: steps.specific-deploy.outcome == 'success' || steps.fallback.outcome == 'success'
+        run: |
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --to-latest \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
 
       # ================================================================
       # SMOKE TEST (both modes)
