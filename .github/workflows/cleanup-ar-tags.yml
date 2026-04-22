@@ -109,6 +109,39 @@ jobs:
 
           echo "Kept the last $KEEP images carrying sha-* tags; deleted $deleted older sha-* tags."
 
+      - name: Cleanup old pr-* tags
+        # Merged PRs leave their pr-<N> image tag in AR so the next deploy
+        # to main can reuse it (see deploy-cloud-run's preview-reuse step).
+        # Once the merge is ≥14 days old, the tag is no longer useful and
+        # contributes to noise — prune it here.
+        run: |
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          CUTOFF=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-14d +%Y-%m-%dT%H:%M:%SZ)
+          echo "Pruning pr-* tags on images created before $CUTOFF ..."
+
+          IMAGES=$(gcloud artifacts docker images list "$IMAGE" \
+            --include-tags \
+            --filter="createTime<${CUTOFF}" \
+            --format="csv[no-heading,separator=|](createTime,tags)" 2>/dev/null || true)
+
+          deleted=0
+          while IFS='|' read -r _CREATED TAGS; do
+            [ -z "$TAGS" ] && continue
+            IFS=',' read -r -a TAG_ARR <<< "$TAGS"
+            for T in "${TAG_ARR[@]}"; do
+              case "$T" in
+                pr-*)
+                  echo "Deleting aged tag: $T"
+                  if gcloud artifacts docker tags delete "$IMAGE:$T" --quiet 2>/dev/null; then
+                    deleted=$((deleted + 1))
+                  fi
+                  ;;
+              esac
+            done
+          done <<< "$IMAGES"
+
+          echo "Deleted $deleted stale pr-* tags."
+
       - name: Cleanup untagged images
         run: |
           IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"

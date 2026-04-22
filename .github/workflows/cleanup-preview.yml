@@ -60,6 +60,12 @@ jobs:
           fi
 
       - name: Delete preview image tag
+        # Keep the pr-<N> AR tag on merge — deploy-cloud-run reads it to
+        # reuse the preview image and skip Build & Push. The tag is
+        # pruned later by cleanup-ar-tags on the weekly cron. When a PR
+        # is closed WITHOUT merging, there's nothing to reuse so we
+        # delete the tag immediately.
+        if: github.event.pull_request.merged == false
         run: |
           TAG="pr-${{ github.event.pull_request.number }}"
           IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:$TAG"
