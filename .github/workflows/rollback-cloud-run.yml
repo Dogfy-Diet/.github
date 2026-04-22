@@ -95,33 +95,56 @@ jobs:
             | jq -r '.status.traffic[] | select(.percent==100 and (.tag == null or .tag == "")) | .revisionName' \
             | head -1)
 
-          # Revisions currently tagged (previews) — exclude them as candidates
-          TAGGED=$(echo "$SERVICE_JSON" \
-            | jq -r '.status.traffic[] | select(.tag != null and .tag != "") | .revisionName')
+          # Prefer the service annotation written by the last successful
+          # deploy/promote. It records the revision that was serving
+          # BEFORE the last deploy, which is what we actually want to
+          # roll back to — not the newest non-current revision (which
+          # can be a failed-deploy remnant).
+          ANNOTATION_REV=$(echo "$SERVICE_JSON" \
+            | jq -r '.metadata.annotations["dogfydiet.com/previous-revision"] // ""')
 
-          # Walk revisions newest-first; first one that is neither CURRENT
-          # nor TAGGED is our rollback target.
           PREVIOUS=""
-          while IFS= read -r rev; do
-            [ -z "$rev" ] && continue
-            [ "$rev" = "$CURRENT" ] && continue
-            if [ -n "$TAGGED" ] && printf '%s\n' "$TAGGED" | grep -qxF "$rev"; then
-              continue
+          METHOD=""
+          if [ -n "$ANNOTATION_REV" ] && [ "$ANNOTATION_REV" != "$CURRENT" ]; then
+            EXISTS=$(gcloud run revisions describe "$ANNOTATION_REV" \
+              --region=${{ inputs.region }} \
+              --project=${{ vars.GCP_PROJECT }} \
+              --format='value(metadata.name)' 2>/dev/null || true)
+            if [ -n "$EXISTS" ]; then
+              PREVIOUS="$ANNOTATION_REV"
+              METHOD="annotation"
             fi
-            PREVIOUS="$rev"
-            break
-          done < <(gcloud run revisions list \
-            --service=${{ inputs.service }} \
-            --region=${{ inputs.region }} \
-            --project=${{ vars.GCP_PROJECT }} \
-            --format='value(metadata.name)' \
-            --sort-by='~metadata.creationTimestamp' 2>/dev/null || true)
+          fi
+
+          # Fallback: walk revisions newest-first, skipping CURRENT and
+          # anything holding a Cloud Run traffic tag (preview revisions).
+          if [ -z "$PREVIOUS" ]; then
+            TAGGED=$(echo "$SERVICE_JSON" \
+              | jq -r '.status.traffic[] | select(.tag != null and .tag != "") | .revisionName')
+
+            while IFS= read -r rev; do
+              [ -z "$rev" ] && continue
+              [ "$rev" = "$CURRENT" ] && continue
+              if [ -n "$TAGGED" ] && printf '%s\n' "$TAGGED" | grep -qxF "$rev"; then
+                continue
+              fi
+              PREVIOUS="$rev"
+              METHOD="walker"
+              break
+            done < <(gcloud run revisions list \
+              --service=${{ inputs.service }} \
+              --region=${{ inputs.region }} \
+              --project=${{ vars.GCP_PROJECT }} \
+              --format='value(metadata.name)' \
+              --sort-by='~metadata.creationTimestamp' 2>/dev/null || true)
+          fi
 
           echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
           echo "previous=${PREVIOUS}" >> "$GITHUB_OUTPUT"
+          echo "method=${METHOD}" >> "$GITHUB_OUTPUT"
 
           if [ -n "$PREVIOUS" ]; then
-            echo "Found previous revision: $PREVIOUS (current: $CURRENT)"
+            echo "Found previous revision: $PREVIOUS (via $METHOD; current: $CURRENT)"
           else
             echo "No previous revision found, will fall back to pro-previous tag"
           fi

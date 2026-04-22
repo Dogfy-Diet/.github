@@ -203,13 +203,76 @@ jobs:
       # ================================================================
       # BUILD & PUSH
       # ================================================================
-      - uses: docker/setup-buildx-action@v3
-
       - id: meta
         run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      # ================================================================
+      # PREVIEW-IMAGE REUSE
+      # On a squash-merge from a PR, the last preview build already pushed
+      # a pr-<N> tag to AR against the exact same tree. Re-using that
+      # digest lets us skip the ~5 min rebuild. Safety: we only reuse when
+      # the merge commit's tree hash equals the PR head's tree hash, which
+      # is exactly the case for a squash that hasn't picked up main drift.
+      # Any mismatch → fall through to a fresh build.
+      # ================================================================
+      - name: Check for reusable preview image
+        id: preview-reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Not a push event, skipping reuse check"
+            exit 0
+          fi
+
+          PR_DATA=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '.[0] // empty' 2>/dev/null || true)
+          if [ -z "$PR_DATA" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "No PR associated with commit ${{ github.sha }}"
+            exit 0
+          fi
+
+          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.number')
+          PR_HEAD_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
+
+          # Read tree hashes from the API — this works even if the PR
+          # branch has been deleted (the commit and its tree stay
+          # reachable by SHA).
+          MERGE_TREE=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}" \
+            --jq '.commit.tree.sha' 2>/dev/null || true)
+          PR_HEAD_TREE=$(gh api "repos/${{ github.repository }}/commits/${PR_HEAD_SHA}" \
+            --jq '.commit.tree.sha' 2>/dev/null || true)
+
+          if [ -z "$MERGE_TREE" ] || [ -z "$PR_HEAD_TREE" ] || [ "$MERGE_TREE" != "$PR_HEAD_TREE" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Tree mismatch or unavailable (merge=${MERGE_TREE:-<missing>} pr_head=${PR_HEAD_TREE:-<missing>}) — building fresh"
+            exit 0
+          fi
+
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${AR_IMAGE}:pr-${PR_NUMBER}" \
+            --format='value(image_summary.digest)' 2>/dev/null || true)
+
+          if [ -z "$DIGEST" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "pr-${PR_NUMBER} tag not found in AR — building fresh"
+            exit 0
+          fi
+
+          echo "reuse=true" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "✓ Reusing preview image from PR #${PR_NUMBER} (${DIGEST})"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.preview-reuse.outputs.reuse != 'true'
+
       - name: Build & Push
         id: build
+        if: steps.preview-reuse.outputs.reuse != 'true'
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
@@ -217,7 +280,6 @@ jobs:
           push: true
           tags: |
             ${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}
-            ${{ vars.AR_REPO }}/${{ inputs.service }}:stg-latest
           build-args: ${{ inputs.build_args }}
           cache-from: type=registry,ref=${{ vars.AR_REPO }}/${{ inputs.service }}:buildcache
           cache-to: type=registry,ref=${{ vars.AR_REPO }}/${{ inputs.service }}:buildcache,mode=max
@@ -225,6 +287,17 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Retag preview digest as sha-<merge>
+        if: steps.preview-reuse.outputs.reuse == 'true'
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          DIGEST="${{ steps.preview-reuse.outputs.digest }}"
+          echo "Aliasing ${DIGEST} as sha-${{ steps.meta.outputs.sha_short }}"
+          gcloud artifacts docker tags add \
+            "${AR_IMAGE}@${DIGEST}" \
+            "${AR_IMAGE}:sha-${{ steps.meta.outputs.sha_short }}" \
+            --quiet
 
       # ================================================================
       # SAVE CURRENT REVISION (for auto-rollback if smoke test fails)
@@ -250,13 +323,18 @@ jobs:
       - name: Resolve image
         id: resolve
         run: |
+          if [ "${{ steps.preview-reuse.outputs.reuse }}" = "true" ]; then
+            DIGEST="${{ steps.preview-reuse.outputs.digest }}"
+          else
+            DIGEST="${{ steps.build.outputs.digest }}"
+          fi
           echo "image=${{ vars.AR_REPO }}/${{ inputs.service }}:sha-${{ steps.meta.outputs.sha_short }}" >> "$GITHUB_OUTPUT"
-          echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ inputs.service }} \
-            --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.build.outputs.digest }} \
+            --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.resolve.outputs.digest }} \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
 
@@ -332,6 +410,38 @@ jobs:
             --to-revisions=${{ steps.pre-deploy.outputs.revision }}=100 \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }}
+
+      # ================================================================
+      # MOVE stg-latest TAG — only after deploy + smoke success so a
+      # failed deploy doesn't leave stg-latest pointing at a broken digest.
+      # Same atomic-tag-move pattern as promote-cloud-run.yml.
+      # ================================================================
+      - name: Move stg-latest tag
+        if: success()
+        run: |
+          AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          DIGEST="${{ steps.resolve.outputs.digest }}"
+          echo "Moving stg-latest → ${DIGEST}"
+          gcloud artifacts docker tags add \
+            "${AR_IMAGE}@${DIGEST}" \
+            "${AR_IMAGE}:stg-latest" \
+            --quiet
+
+      # ================================================================
+      # RECORD PREVIOUS-REVISION — service-level annotation that the
+      # rollback-previous workflow reads to find the correct rollback
+      # target, bypassing the newest-non-current walker which can land
+      # on revisions left behind by failed deploys.
+      # Service-level annotations do not create new revisions.
+      # ================================================================
+      - name: Record previous-revision annotation
+        if: success() && steps.pre-deploy.outputs.revision != ''
+        run: |
+          gcloud run services update ${{ inputs.service }} \
+            --update-annotations="dogfydiet.com/previous-revision=${{ steps.pre-deploy.outputs.revision }}" \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --quiet
 
       # ================================================================
       # CDN INVALIDATION — only on success so a rolled-back service

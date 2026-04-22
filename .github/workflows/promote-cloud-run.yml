@@ -347,6 +347,19 @@ jobs:
             --project=${{ vars.GCP_PROJECT }}
 
       # ================================================================
+      # RECORD PREVIOUS-REVISION — service-level annotation for the
+      # rollback-previous workflow to read instead of walking revisions.
+      # ================================================================
+      - name: Record previous-revision annotation
+        if: success() && steps.pre-deploy.outputs.revision != ''
+        run: |
+          gcloud run services update ${{ inputs.service }} \
+            --update-annotations="dogfydiet.com/previous-revision=${{ steps.pre-deploy.outputs.revision }}" \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --quiet
+
+      # ================================================================
       # CDN INVALIDATION — only on success
       # ================================================================
       - name: Invalidate CDN cache
