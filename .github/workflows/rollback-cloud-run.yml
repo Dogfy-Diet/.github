@@ -165,8 +165,8 @@ jobs:
           #   pro-previous                → as-is        (mutable tag)
           if echo "$RAW" | grep -qE '^[0-9a-f]{7,40}$'; then
             RESOLVED="sha-${RAW:0:7}"
-          elif echo "$RAW" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
-            RESOLVED="v${RAW}"
+          elif echo "$RAW" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            RESOLVED="v${RAW#v}"
           else
             RESOLVED="$RAW"
           fi
@@ -257,6 +257,7 @@ jobs:
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.sha }}
         run: |
           if [ -n "${{ inputs.cdn_host }}" ]; then
             ENV_URL="https://${{ inputs.cdn_host }}"
@@ -271,12 +272,15 @@ jobs:
             DESCRIPTION="Rollback ${{ inputs.service }} to ${{ inputs.version }}"
           fi
 
-          DEPLOY_ID=$(gh api repos/${{ github.repository }}/deployments \
-            -f ref="${{ github.sha }}" \
-            -f environment="production" \
-            -f description="${DESCRIPTION}" \
-            -f auto_merge=false \
-            --jq '.id')
+          # required_contexts: [] so the deployment isn't rejected by failing
+          # commit status checks. gh api's -f/-F can't encode an empty JSON
+          # array — build the body with jq and feed via --input.
+          DEPLOY_ID=$(jq -n \
+            --arg ref "$REF" \
+            --arg env "production" \
+            --arg desc "$DESCRIPTION" \
+            '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: []}' \
+            | gh api repos/${{ github.repository }}/deployments --input - --jq '.id')
           gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
             -f state=success \
             -f environment_url="${ENV_URL}" \

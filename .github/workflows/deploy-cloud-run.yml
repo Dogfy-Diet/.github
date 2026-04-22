@@ -209,15 +209,20 @@ jobs:
 
       # ================================================================
       # SAVE CURRENT REVISION (for auto-rollback if smoke test fails)
+      # Use the revision currently serving 100% of traffic, NOT just
+      # the most-recently-created one — preview deploys (pr-* tags,
+      # --no-traffic) create revisions that are the newest but don't
+      # receive traffic, so rolling back to them would be a no-op.
       # ================================================================
       - name: Save current revision
         id: pre-deploy
         run: |
-          REVISION=$(gcloud run revisions list \
-            --service=${{ inputs.service }} \
+          REVISION=$(gcloud run services describe ${{ inputs.service }} \
             --region=${{ inputs.region }} \
             --project=${{ vars.GCP_PROJECT }} \
-            --format='value(name)' --limit=1 --sort-by='~creationTimestamp' 2>/dev/null || true)
+            --format='json' 2>/dev/null \
+            | jq -r '.status.traffic[] | select(.percent==100 and (.tag == null or .tag == "")) | .revisionName' \
+            | head -1 || true)
           echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
 
       # ================================================================
