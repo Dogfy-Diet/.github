@@ -168,14 +168,17 @@ jobs:
       - if: inputs.install_command != ''
         run: ${{ inputs.install_command }}
 
+      # Build cache is keyed strictly by commit SHA with NO restore-keys
+      # fallback. A fallback match from a different SHA restored stale Nuxt
+      # .nuxt/dist chunks that didn't get re-emitted on incremental builds
+      # (observed with lang JSON changes baked into cached i18n chunks).
+      # Cold build on first run of a SHA is a fair trade for correctness.
       - name: Restore build cache
         if: inputs.build_cache_path != ''
         uses: actions/cache@v4
         with:
           path: ${{ inputs.build_cache_path }}
           key: ${{ runner.os }}-build-${{ inputs.service }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-build-${{ inputs.service }}-
 
       - if: inputs.build_command != ''
         env:

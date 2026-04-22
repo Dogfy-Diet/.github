@@ -149,6 +149,12 @@ jobs:
       - if: inputs.install_command != ''
         run: ${{ inputs.install_command }}
 
+      # Build cache keyed by commit SHA within the PR scope. Restore-keys
+      # scope is limited to "same PR" so we don't pull cached Nuxt chunks
+      # from another PR (different translations/components) that would be
+      # reused incorrectly. First push of a PR does a cold build; further
+      # pushes on the same PR can reuse the incremental cache from the
+      # previous commit of the SAME PR.
       - name: Restore build cache
         if: inputs.build_cache_path != ''
         uses: actions/cache@v4
@@ -157,7 +163,6 @@ jobs:
           key: ${{ runner.os }}-build-${{ inputs.service }}-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-build-${{ inputs.service }}-pr-${{ github.event.pull_request.number }}-
-            ${{ runner.os }}-build-${{ inputs.service }}-
 
       - if: inputs.build_command != ''
         env:
