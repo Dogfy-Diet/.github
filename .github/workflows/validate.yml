@@ -60,6 +60,16 @@ on:
         type: string
         default: "default"
         description: "Namespace for node_modules cache (useful for monorepos where multiple apps share this reusable)."
+      env_vars:
+        type: string
+        default: ""
+        description: |
+          Multiline KEY=VALUE env vars exposed to every check job before the
+          install / setup / lint / typecheck / test / build / audit commands
+          run. App-specific — leave empty for apps that don't need stubs.
+          Common use case: Nuxt plugins that require env vars to initialize
+          even during `nuxt prepare` or vitest setup (GTM_ID, FACEBOOK_PIXEL_ID,
+          etc. with dummy values).
     secrets:
       submodules_token:
         required: false
@@ -104,6 +114,14 @@ jobs:
           key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -162,6 +180,14 @@ jobs:
           key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -220,6 +246,14 @@ jobs:
           key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -278,6 +312,14 @@ jobs:
           key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
       - run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
@@ -336,6 +378,14 @@ jobs:
           key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
       - run: ${{ inputs.install_command }}
       - name: Run security audit
         id: run

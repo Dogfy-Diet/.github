@@ -71,6 +71,13 @@ on:
         type: string
         default: ""
         description: "Directory to cache across runs for incremental builds (e.g. 'apps/website/.nuxt'). Keyed by service + PR number."
+      env_vars:
+        type: string
+        default: ""
+        description: |
+          Multiline KEY=VALUE env vars exposed to the install/build steps.
+          App-specific — use for stub values required by framework init
+          during `nuxt build` and similar.
     secrets:
       submodules_token:
         required: false
@@ -129,6 +136,15 @@ jobs:
           key: ${{ runner.os }}-nm-${{ inputs.service }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-nm-${{ inputs.service }}-
+
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
 
       - if: inputs.install_command != ''
         run: ${{ inputs.install_command }}
