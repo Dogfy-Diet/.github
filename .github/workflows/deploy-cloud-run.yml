@@ -255,15 +255,22 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          # --traffic LATEST=100 explicitly routes traffic to the newly
-          # deployed revision. Without it, if a previous auto-rollback
-          # pinned traffic to an older revision, subsequent deploys
-          # silently create revisions that never serve traffic.
           gcloud run deploy ${{ inputs.service }} \
             --image=${{ vars.AR_REPO }}/${{ inputs.service }}@${{ steps.build.outputs.digest }} \
             --region=${{ inputs.region }} \
-            --project=${{ vars.GCP_PROJECT }} \
-            --traffic LATEST=100
+            --project=${{ vars.GCP_PROJECT }}
+
+      - name: Route traffic to latest revision
+        # `gcloud run deploy` does NOT shift traffic when an explicit split
+        # is already pinned on the service — which is the exact state the
+        # auto-rollback step below leaves behind. `update-traffic --to-latest`
+        # re-routes 100% to whatever revision was just deployed, undoing any
+        # prior pin. Idempotent when traffic is already on latest.
+        run: |
+          gcloud run services update-traffic ${{ inputs.service }} \
+            --to-latest \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }}
 
       - name: Get service URL
         id: url
