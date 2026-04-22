@@ -70,6 +70,10 @@ jobs:
     name: Lint
     if: inputs.lint_command != ''
     runs-on: ubuntu-latest
+    # Exposed to every step so commands that load app config (e.g. nuxt
+    # prepare / vitest setup) can fetch @nuxt/content repository sources.
+    env:
+      GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
@@ -126,6 +130,8 @@ jobs:
     name: Typecheck
     if: inputs.typecheck_command != ''
     runs-on: ubuntu-latest
+    env:
+      GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
@@ -182,6 +188,8 @@ jobs:
     name: Test
     if: inputs.test_command != ''
     runs-on: ubuntu-latest
+    env:
+      GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
@@ -238,6 +246,8 @@ jobs:
     name: Build
     if: inputs.build_command != ''
     runs-on: ubuntu-latest
+    env:
+      GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
@@ -294,6 +304,8 @@ jobs:
     name: Security audit
     if: inputs.audit_command != ''
     runs-on: ubuntu-latest
+    env:
+      GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
