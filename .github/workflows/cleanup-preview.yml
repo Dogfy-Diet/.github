@@ -84,18 +84,30 @@ jobs:
         # by the delete-old-untagged policy).
         if: github.event.pull_request.merged == false
         run: |
-          TAG="pr-${{ github.event.pull_request.number }}"
-          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:$TAG"
-          echo "Deleting AR image tag: $IMAGE"
-          if OUT=$(gcloud artifacts docker tags delete "$IMAGE" --quiet 2>&1); then
-            echo "Deleted image tag $TAG"
-          elif echo "$OUT" | grep -qiE "not found|NOT_FOUND|404"; then
-            echo "Image tag $TAG not found (already deleted or never pushed)"
-          else
-            echo "$OUT"
-            echo "::error::Failed to delete AR image tag $TAG"
-            exit 1
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          # Bare pr-<N> plus every commit-bound pr-<N>-<sha7> tag pushed by
+          # this PR's preview builds. Anchored regex so pr-1 never matches
+          # pr-12 or pr-12-<sha7>.
+          TAGS=$(gcloud artifacts docker tags list "$IMAGE" \
+            --format='value(tag)' 2>/dev/null | grep -E "^pr-${PR_NUMBER}(-[0-9a-f]{7})?$" || true)
+          if [ -z "$TAGS" ]; then
+            echo "No pr-${PR_NUMBER} image tags found (never pushed or already deleted)"
+            exit 0
           fi
+          FAILED=0
+          for TAG in $TAGS; do
+            if OUT=$(gcloud artifacts docker tags delete "$IMAGE:$TAG" --quiet 2>&1); then
+              echo "Deleted image tag $TAG"
+            elif echo "$OUT" | grep -qiE "not found|NOT_FOUND|404"; then
+              echo "Image tag $TAG already gone"
+            else
+              echo "$OUT"
+              echo "::error::Failed to delete AR image tag $TAG"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
 
       - name: Summary
         if: always()

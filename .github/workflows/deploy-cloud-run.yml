@@ -139,10 +139,14 @@ jobs:
       # ================================================================
       # PREVIEW-IMAGE REUSE
       # On a squash-merge from a PR, the last preview build already pushed
-      # a pr-<N> tag to AR against the exact same tree. Re-using that
-      # digest lets us skip the ~5 min rebuild. Safety: we only reuse when
-      # the merge commit's tree hash equals the PR head's tree hash, which
-      # is exactly the case for a squash that hasn't picked up main drift.
+      # its image to AR against the exact same tree. Re-using that digest
+      # lets us skip the ~5 min rebuild. Two safety gates (see ADR-015):
+      #   1. Tree equality — merge commit tree == PR head tree (no drift).
+      #   2. Image↔commit binding — we only trust pr-<N>-<head_sha7>, the
+      #      tag the preview pins to the commit it was built from. The bare
+      #      pr-<N> tag can be STALE: if the head commit's preview build
+      #      failed or was cancelled, pr-<N> still points at the previous
+      #      commit's image and the tree check alone cannot catch it.
       # Any mismatch → fall through to a fresh build.
       # ================================================================
       - name: Check for reusable preview image
@@ -184,13 +188,14 @@ jobs:
           fi
 
           AR_IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}"
+          BOUND_TAG="pr-${PR_NUMBER}-$(echo "$PR_HEAD_SHA" | cut -c1-7)"
           DIGEST=$(gcloud artifacts docker images describe \
-            "${AR_IMAGE}:pr-${PR_NUMBER}" \
+            "${AR_IMAGE}:${BOUND_TAG}" \
             --format='value(image_summary.digest)' 2>/dev/null || true)
 
           if [ -z "$DIGEST" ]; then
             echo "reuse=false" >> "$GITHUB_OUTPUT"
-            echo "pr-${PR_NUMBER} tag not found in AR — building fresh"
+            echo "${BOUND_TAG} not found in AR (head commit has no completed preview build) — building fresh"
             exit 0
           fi
 
