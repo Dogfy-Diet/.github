@@ -34,6 +34,14 @@ jobs:
     name: "Cleanup PR preview"
     runs-on: ubuntu-latest
     environment: stg
+    # Same group as preview-cloud-run's deploy job. Closing a PR while a
+    # preview is still deploying would otherwise let the in-flight deploy
+    # re-create the traffic tag right after cleanup removed it, leaving an
+    # orphaned tag+revision (Cloud Run never GCs tagged revisions). Sharing
+    # the group with cancel-in-progress cancels that in-flight preview first.
+    concurrency:
+      group: preview-${{ inputs.service }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       id-token: write
@@ -47,33 +55,46 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Remove traffic tag
+        # not-found is benign (tag already gone or preview never ran), but a
+        # real failure (IAM, API outage) must fail the job — previously both
+        # were swallowed by 2>/dev/null and reported as "not found".
         run: |
           TAG="pr-${{ github.event.pull_request.number }}"
           echo "Removing Cloud Run traffic tag: $TAG"
-          if gcloud run services update-traffic ${{ inputs.service }} \
+          if OUT=$(gcloud run services update-traffic ${{ inputs.service }} \
             --remove-tags="$TAG" \
             --region=${{ inputs.region }} \
-            --project=${{ vars.GCP_PROJECT }} 2>/dev/null; then
+            --project=${{ vars.GCP_PROJECT }} 2>&1); then
             echo "Removed traffic tag $TAG"
-          else
+          elif echo "$OUT" | grep -qiE "not found|does not exist"; then
             echo "Traffic tag $TAG not found (already removed or never created)"
+          else
+            echo "$OUT"
+            echo "::error::Failed to remove traffic tag $TAG"
+            exit 1
           fi
 
       - name: Delete preview image tag
         # Keep the pr-<N> AR tag on merge — deploy-cloud-run reads it to
-        # reuse the preview image and skip Build & Push. The tag is
-        # pruned later by cleanup-ar-tags on the weekly cron. When a PR
-        # is closed WITHOUT merging, there's nothing to reuse so we
-        # delete the tag immediately.
+        # reuse the preview image and skip Build & Push. Aged pr-* tags are
+        # pruned server-side by the AR cleanup policies (ADR-014 in the
+        # infrastructure repo; >14d), which replace the cleanup-ar-tags cron.
+        # When a PR is closed WITHOUT merging, there's nothing to reuse so we
+        # delete the tag immediately (the untagged digest is then collected
+        # by the delete-old-untagged policy).
         if: github.event.pull_request.merged == false
         run: |
           TAG="pr-${{ github.event.pull_request.number }}"
           IMAGE="${{ vars.AR_REPO }}/${{ inputs.service }}:$TAG"
           echo "Deleting AR image tag: $IMAGE"
-          if gcloud artifacts docker tags delete "$IMAGE" --quiet 2>/dev/null; then
+          if OUT=$(gcloud artifacts docker tags delete "$IMAGE" --quiet 2>&1); then
             echo "Deleted image tag $TAG"
-          else
+          elif echo "$OUT" | grep -qiE "not found|NOT_FOUND|404"; then
             echo "Image tag $TAG not found (already deleted or never pushed)"
+          else
+            echo "$OUT"
+            echo "::error::Failed to delete AR image tag $TAG"
+            exit 1
           fi
 
       - name: Summary
