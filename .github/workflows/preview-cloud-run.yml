@@ -184,6 +184,19 @@ jobs:
       # -- Build & push to centralized AR -----------------------------------
       - uses: docker/setup-buildx-action@v3
 
+      # On pull_request events github.sha is the synthetic test-merge commit,
+      # so the image↔commit binding tag must use the PR head SHA instead.
+      - name: Compute commit-bound tag
+        id: head-tag
+        run: echo "sha7=$(echo '${{ github.event.pull_request.head.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      # Two tags per build:
+      #   pr-<N>        → human-friendly "latest preview of this PR"
+      #   pr-<N>-<sha7> → image↔commit binding. deploy-cloud-run's
+      #                   preview-reuse only trusts THIS tag: if the head
+      #                   commit's preview build failed or was cancelled, the
+      #                   bound tag is absent and the deploy falls back to a
+      #                   fresh build instead of reusing a stale image.
       - uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
@@ -191,6 +204,7 @@ jobs:
           push: true
           tags: |
             ${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}
+            ${{ vars.AR_REPO }}/${{ inputs.service }}:pr-${{ github.event.pull_request.number }}-${{ steps.head-tag.outputs.sha7 }}
           build-args: ${{ inputs.build_args }}
           cache-from: type=registry,ref=${{ vars.AR_REPO }}/${{ inputs.service }}:buildcache
           cache-to: type=registry,ref=${{ vars.AR_REPO }}/${{ inputs.service }}:buildcache,mode=max
