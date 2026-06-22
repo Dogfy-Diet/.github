@@ -363,14 +363,22 @@ jobs:
       - name: Get service URL
         id: url
         run: |
+          # Direct Cloud Run URL (.run.app) — always resolved. The smoke test
+          # hits THIS so the health check reaches the just-deployed revision
+          # directly, with no Cloud CDN edge / LB serverless-NEG propagation or
+          # cold-start race (which otherwise yields false smoke failures and an
+          # unnecessary auto-rollback even when the revision is healthy).
+          RUN_URL=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(status.url)')
+          echo "run_url=${RUN_URL}" >> "$GITHUB_OUTPUT"
+          # Public/display URL: the custom domain when fronted by a LB+CDN, else
+          # the run.app. Used for CDN invalidation and the deployment env URL.
           if [ -n "${{ inputs.cdn_host }}" ]; then
             echo "url=https://${{ inputs.cdn_host }}" >> "$GITHUB_OUTPUT"
           else
-            URL=$(gcloud run services describe ${{ inputs.service }} \
-              --region=${{ inputs.region }} \
-              --project=${{ vars.GCP_PROJECT }} \
-              --format='value(status.url)')
-            echo "url=${URL}" >> "$GITHUB_OUTPUT"
+            echo "url=${RUN_URL}" >> "$GITHUB_OUTPUT"
           fi
 
       # ================================================================
@@ -396,17 +404,23 @@ jobs:
         id: smoke
         if: inputs.smoke_test_path != ''
         run: |
-          URL="${{ steps.url.outputs.url }}${{ inputs.smoke_test_path }}"
-          for i in 1 2 3; do
-            sleep 5
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
-            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
-              echo "Smoke test passed (HTTP $STATUS)"
-              exit 0
-            fi
-            echo "Attempt $i: HTTP $STATUS"
+          # Hit the Cloud Run revision directly (run.app) first — robust against
+          # CDN/LB cold-start propagation. Fall back to the public URL so
+          # ingress-restricted services (e.g. IAP / LB-only) are still covered;
+          # when there's no cdn_host the two URLs are identical (extra retries).
+          for BASE in "${{ steps.url.outputs.run_url }}" "${{ steps.url.outputs.url }}"; do
+            URL="${BASE}${{ inputs.smoke_test_path }}"
+            for i in 1 2 3; do
+              sleep 5
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
+              if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+                echo "Smoke test passed (HTTP $STATUS) on $URL"
+                exit 0
+              fi
+              echo "Attempt $i on $URL: HTTP $STATUS"
+            done
           done
-          echo "Smoke test FAILED after 3 attempts"
+          echo "Smoke test FAILED"
           exit 1
 
       # ================================================================
