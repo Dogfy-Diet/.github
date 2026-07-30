@@ -8,9 +8,11 @@
 #
 # Required GitHub variables:
 #   Repository level : AR_REPO      (e.g. europe-west1-docker.pkg.dev/dogfy-host/docker)
-#   Environment "stg": GCP_PROJECT  (e.g. dogfy-platform-stg)
+#   Per environment  : GCP_PROJECT  (e.g. dogfy-platform-stg)
 #                      SA_EMAIL     (deployer SA for this service)
 #                      WIF_PROVIDER (WIF provider full resource name)
+#   The environment defaults to "stg"; single-env repos (e.g. apps living in
+#   dogfy-automation) override it via the `environment` input.
 #
 # Infra prerequisites:
 #   - Cloud Run service must have ingress = INGRESS_TRAFFIC_ALL (staging only)
@@ -27,6 +29,10 @@ on:
         required: true
         type: string
         description: "Cloud Run service name (must match Terraform, e.g. dogfy-new-help-center)"
+      environment:
+        type: string
+        default: "stg"
+        description: "GitHub environment holding GCP_PROJECT / SA_EMAIL / WIF_PROVIDER (e.g. stg, automation)."
       region:
         type: string
         default: "europe-west1"
@@ -90,7 +96,7 @@ jobs:
   preview:
     name: "Deploy PR preview"
     runs-on: ubuntu-latest
-    environment: stg
+    environment: ${{ inputs.environment }}
     concurrency:
       group: preview-${{ inputs.service }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true

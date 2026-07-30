@@ -11,7 +11,9 @@
 #
 # Required GitHub variables:
 #   Repository level : AR_REPO
-#   Environment "stg": GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
+#   Per environment  : GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
+#   The environment defaults to "stg"; must match the one preview-cloud-run
+#   deploys to.
 # =============================================================================
 name: Cleanup Preview
 
@@ -21,6 +23,10 @@ on:
       service:
         required: true
         type: string
+      environment:
+        type: string
+        default: "stg"
+        description: "GitHub environment holding GCP_PROJECT / SA_EMAIL / WIF_PROVIDER. Must match preview-cloud-run's."
       region:
         type: string
         default: "europe-west1"
@@ -33,7 +39,7 @@ jobs:
   cleanup:
     name: "Cleanup PR preview"
     runs-on: ubuntu-latest
-    environment: stg
+    environment: ${{ inputs.environment }}
     # Same group as preview-cloud-run's deploy job. Closing a PR while a
     # preview is still deploying would otherwise let the in-flight deploy
     # re-create the traffic tag right after cleanup removed it, leaving an
