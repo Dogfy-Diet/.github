@@ -23,6 +23,18 @@
 #   - Semver (1.4.0 / v1.4.0) → source is stg-latest, tagged as v1.4.0
 #                               on success
 #   - AR tag (sha-b075fa6, stg-latest, pro-previous) → used as-is
+#   - Empty on a push event → auto-resolve by merge provenance (PTF-302):
+#       hotfix/feature PR merge → the PR's own commit-bound preview image
+#       (pr-<N>-<sha7>, trusted per ADR-015); release-sprint-* merge or
+#       direct push → stg-latest, gated by the provenance guard.
+#
+# Provenance guard (PTF-302): on non-trunk repos staging deploys from
+# release-sprint-* branches, so on a push to main `stg-latest` is NOT
+# necessarily built from main — promoting it after a hotfix merge ships
+# the in-flight sprint. Whenever the resolved source is stg-latest on a
+# push event, the commit it was built from must be an ancestor of
+# github.sha, or the promote fails red. workflow_dispatch skips the
+# guard (manual escape hatch) with a warning.
 #
 # Features:
 #   - Pre-deploy context: shows source vs production image comparison
@@ -50,9 +62,10 @@ on:
         type: string
         description: "Cloud Run service name (must match Terraform)"
       version:
-        required: true
+        required: false
+        default: ""
         type: string
-        description: "Version to promote. Accepts: commit hash (b075fa6), semver (v1.4.0 or 1.4.0), tag (stg-latest, sha-b075fa6)."
+        description: "Version to promote. Accepts: commit hash (b075fa6), semver (v1.4.0 or 1.4.0), tag (stg-latest, sha-b075fa6). Empty on a push event = auto-resolve by merge provenance (see header)."
       environment:
         type: string
         default: "production"
@@ -96,6 +109,10 @@ jobs:
       contents: read
       id-token: write
       deployments: write
+      # Needed by the auto-resolve step (commits/{sha}/pulls). Callers must
+      # grant it too — a caller without it degrades gracefully: auto-resolve
+      # fails to find the PR and falls back to stg-latest + provenance guard.
+      pull-requests: read
 
     steps:
       # ================================================================
@@ -109,6 +126,55 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       # ================================================================
+      # AUTO-RESOLVE SOURCE (push event, no explicit version) — PTF-302
+      # Decides WHAT a push to main should promote, by merge provenance:
+      #   - Hotfix/feature PR merge → the PR's own commit-bound preview
+      #     image pr-<N>-<sha7> (trusted per ADR-015), after proving the
+      #     PR head tree == the merge commit tree. NOT stg-latest, which
+      #     on non-trunk repos points at the in-flight sprint.
+      #   - Release merge (release-sprint-*) → stg-latest: that exact
+      #     digest is what was validated on staging. The provenance
+      #     guard below proves it is now an ancestor of main.
+      #   - No PR found (direct push) → stg-latest + provenance guard.
+      # ================================================================
+      - name: Auto-resolve source (push)
+        id: auto
+        if: github.event_name == 'push' && inputs.version == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '[.[] | select(.merge_commit_sha == "${{ github.sha }}")][0] // empty' 2>/dev/null || true)
+          if [ -z "$PR" ]; then
+            echo "No merged PR found for ${GITHUB_SHA:0:7} (direct push?) — falling back to stg-latest; the provenance guard must pass"
+            echo "src_tag=stg-latest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PR_NUMBER=$(echo "$PR" | jq -r '.number')
+          HEAD_SHA=$(echo "$PR" | jq -r '.head.sha')
+          HEAD_REF=$(echo "$PR" | jq -r '.head.ref')
+
+          if echo "$HEAD_REF" | grep -qE '^release-sprint-'; then
+            echo "PR #${PR_NUMBER} is a release merge (${HEAD_REF}) — promoting stg-latest (the digest validated on staging); the provenance guard will verify it"
+            echo "src_tag=stg-latest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Hotfix/feature merge: ship the PR's own image. Tree equality
+          # proves that image's content == what main now holds; it fails
+          # when main had commits the PR branch lacked (back-merge needed).
+          MERGE_TREE=$(gh api "repos/${{ github.repository }}/git/commits/${{ github.sha }}" --jq '.tree.sha')
+          HEAD_TREE=$(gh api "repos/${{ github.repository }}/git/commits/${HEAD_SHA}" --jq '.tree.sha')
+          if [ "$MERGE_TREE" != "$HEAD_TREE" ]; then
+            echo "::error::PR #${PR_NUMBER} head tree (${HEAD_TREE:0:12}) != merge commit tree (${MERGE_TREE:0:12}) — main contains changes the PR image was not built from. Back-merge main into ${HEAD_REF} and re-merge, or promote a known-good image via workflow_dispatch."
+            exit 1
+          fi
+
+          BOUND_TAG="pr-${PR_NUMBER}-$(echo "$HEAD_SHA" | cut -c1-7)"
+          echo "PR #${PR_NUMBER} (${HEAD_REF}) merged as ${GITHUB_SHA:0:7} — promoting its commit-bound image ${BOUND_TAG}"
+          echo "src_tag=${BOUND_TAG}" >> "$GITHUB_OUTPUT"
+
+      # ================================================================
       # RESOLVE VERSION — NORMALIZE USER INPUT TO A SOURCE TAG
       # Semver is a SHORTCUT meaning "promote whatever is currently on
       # staging, and also label the image with this version number".
@@ -116,11 +182,16 @@ jobs:
       #   1.4.0 / v1.4.0             → src_tag=stg-latest     is_semver=true  semver_tag=v1.4.0
       #   sha-b075fa6                → src_tag=sha-b075fa6    is_semver=false
       #   stg-latest / pro-previous  → src_tag=<as-is>        is_semver=false
+      # Precedence: auto-resolved source (push) > explicit input >
+      # stg-latest (dispatch with empty input).
       # ================================================================
       - name: Resolve version
         id: version
         run: |
-          RAW="${{ inputs.version }}"
+          RAW="${{ steps.auto.outputs.src_tag || inputs.version }}"
+          if [ -z "$RAW" ]; then
+            RAW="stg-latest"
+          fi
 
           if echo "$RAW" | grep -qE '^[0-9a-f]{7,40}$'; then
             SRC_TAG="sha-${RAW:0:7}"
@@ -158,11 +229,56 @@ jobs:
             --format='value(image_summary.digest)' 2>/dev/null)
           if [ -z "$SRC_DIGEST" ]; then
             echo "::error::Source tag ${SRC_TAG} not found in AR"
+            case "$SRC_TAG" in
+              pr-*)
+                echo "::error::The PR's preview build likely failed or never ran for its head commit, so there is no commit-bound image to promote. Re-run the preview on that commit, or promote a known-good image explicitly via workflow_dispatch."
+                ;;
+            esac
             exit 1
           fi
           echo "ar_image=${AR_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "digest=${SRC_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Source: ${AR_IMAGE}:${SRC_TAG} @ ${SRC_DIGEST}"
+
+      # ================================================================
+      # PROVENANCE GUARD (stg-latest source only) — PTF-302
+      # stg-latest is a mutable tag fed from release-sprint-* branches.
+      # Before shipping it on a push event, prove the commit it was built
+      # from is an ancestor of github.sha — i.e. main already contains
+      # everything inside that image. A hotfix merged while a sprint is
+      # in flight fails here (red) instead of silently publishing
+      # unreleased work. workflow_dispatch skips the check (manual
+      # escape hatch) with a warning. Runs BEFORE anything is deployed.
+      # ================================================================
+      - name: Provenance guard (stg-latest)
+        if: steps.version.outputs.src_tag == 'stg-latest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AR_IMAGE: ${{ steps.src.outputs.ar_image }}
+          SRC_DIGEST: ${{ steps.src.outputs.digest }}
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "::warning::Provenance guard skipped (${{ github.event_name }}): promoting stg-latest without verifying it descends from ${GITHUB_SHA:0:7}"
+            exit 0
+          fi
+          SRC_SHA_TAG=$(gcloud artifacts docker images list "${AR_IMAGE}" \
+            --include-tags --filter="digest=${SRC_DIGEST}" \
+            --format='value(tags)' 2>/dev/null | tr ',' '\n' | grep '^sha-' | head -1)
+          if [ -z "$SRC_SHA_TAG" ]; then
+            echo "::error::Cannot verify provenance: digest ${SRC_DIGEST:0:19}... carries no sha-* tag. If this image is known-good, promote it explicitly via workflow_dispatch."
+            exit 1
+          fi
+          SRC_COMMIT="${SRC_SHA_TAG#sha-}"
+          STATUS=$(gh api "repos/${{ github.repository }}/compare/${SRC_COMMIT}...${{ github.sha }}" --jq '.status' 2>/dev/null || echo "unknown")
+          case "$STATUS" in
+            identical|ahead)
+              echo "Provenance OK: stg-latest built from ${SRC_COMMIT}, an ancestor of ${GITHUB_SHA:0:7} (compare: ${STATUS})"
+              ;;
+            *)
+              echo "::error::stg-latest was built from ${SRC_COMMIT}, which is NOT an ancestor of ${GITHUB_SHA:0:7} (compare: ${STATUS}). Promoting it would ship commits that are not on main (in-flight sprint?). Merge a release, or promote a specific image via workflow_dispatch."
+              exit 1
+              ;;
+          esac
 
       # ================================================================
       # CAPTURE CURRENT PRO-LATEST DIGEST
@@ -424,7 +540,7 @@ jobs:
           | Image | \`${{ steps.src.outputs.ar_image }}\` |
           | Digest | \`${{ steps.src.outputs.digest }}\` |
           | URL | ${{ steps.url.outputs.url }} |
-          | Version input | \`${{ inputs.version }}\` |
+          | Version input | \`${{ inputs.version || '(auto)' }}\` |
           | Resolved source | \`${{ steps.version.outputs.src_tag }}\` |
           | Semver applied | ${{ steps.version.outputs.semver_tag || '(none)' }} |
           | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
