@@ -251,6 +251,12 @@ jobs:
           done <<< "${{ inputs.env_vars }}"
 
       - if: steps.preview-reuse.outputs.reuse != 'true' && inputs.install_command != ''
+        env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
         run: ${{ inputs.install_command }}
 
       # Build cache is keyed strictly by commit SHA with NO restore-keys

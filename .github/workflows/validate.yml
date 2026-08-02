@@ -122,7 +122,13 @@ jobs:
             case "$line" in \#*) continue ;; esac
             echo "$line" >> "$GITHUB_ENV"
           done <<< "${{ inputs.env_vars }}"
-      - run: ${{ inputs.install_command }}
+      - env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
       - name: Run lint
@@ -188,7 +194,13 @@ jobs:
             case "$line" in \#*) continue ;; esac
             echo "$line" >> "$GITHUB_ENV"
           done <<< "${{ inputs.env_vars }}"
-      - run: ${{ inputs.install_command }}
+      - env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
       - name: Run typecheck
@@ -254,7 +266,13 @@ jobs:
             case "$line" in \#*) continue ;; esac
             echo "$line" >> "$GITHUB_ENV"
           done <<< "${{ inputs.env_vars }}"
-      - run: ${{ inputs.install_command }}
+      - env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
       - name: Run tests
@@ -320,7 +338,13 @@ jobs:
             case "$line" in \#*) continue ;; esac
             echo "$line" >> "$GITHUB_ENV"
           done <<< "${{ inputs.env_vars }}"
-      - run: ${{ inputs.install_command }}
+      - env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.install_command }}
       - if: inputs.setup_command != ''
         run: ${{ inputs.setup_command }}
       - name: Run build
@@ -386,7 +410,13 @@ jobs:
             case "$line" in \#*) continue ;; esac
             echo "$line" >> "$GITHUB_ENV"
           done <<< "${{ inputs.env_vars }}"
-      - run: ${{ inputs.install_command }}
+      - env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.install_command }}
       - name: Run security audit
         id: run
         run: |
