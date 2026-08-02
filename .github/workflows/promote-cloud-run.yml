@@ -261,9 +261,12 @@ jobs:
             echo "::warning::Provenance guard skipped (${{ github.event_name }}): promoting stg-latest without verifying it descends from ${GITHUB_SHA:0:7}"
             exit 0
           fi
-          SRC_SHA_TAG=$(gcloud artifacts docker images list "${AR_IMAGE}" \
-            --include-tags --filter="digest=${SRC_DIGEST}" \
-            --format='value(tags)' 2>/dev/null | tr ',' '\n' | grep '^sha-' | head -1)
+          # tags list gives one TAG,VERSION(digest) row per tag — unlike
+          # `images list --filter digest=`, which returns empty (server-side
+          # digest filtering silently doesn't match).
+          SRC_SHA_TAG=$(gcloud artifacts docker tags list "${AR_IMAGE}" \
+            --format='csv[no-heading](tag,version)' 2>/dev/null \
+            | awk -F',' -v d="${SRC_DIGEST}" '$2==d && $1 ~ /^sha-/ {print $1; exit}')
           if [ -z "$SRC_SHA_TAG" ]; then
             echo "::error::Cannot verify provenance: digest ${SRC_DIGEST:0:19}... carries no sha-* tag. If this image is known-good, promote it explicitly via workflow_dispatch."
             exit 1
