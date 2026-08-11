@@ -1,6 +1,6 @@
 # Dogfy-Diet Reusable Workflows
 
-Reusable GitHub Actions workflows shared across all Dogfy-Diet repositories. Any repo in the org can call these via `uses: Dogfy-Diet/.github/.github/workflows/<workflow>@main`.
+Reusable GitHub Actions workflows shared across all Dogfy-Diet repositories. Any repo in the org can call these via `uses: Dogfy-Diet/.github/.github/workflows/<workflow>@vX.Y.Z`, **pinned to the latest release** (see [Versioning & releases](#versioning--releases)).
 
 These workflows implement Dogfy's **trunk-based delivery model** — build once on merge to main, deploy immediately to staging, promote the exact same image digest to production on demand, roll back by traffic shift.
 
@@ -38,6 +38,30 @@ These workflows implement Dogfy's **trunk-based delivery model** — build once 
 
  cron/weekly ─────────▶  cleanup-ar-tags.yml  (prune stale sha-* tags)
 ```
+
+## Versioning & releases
+
+This repo is **semver-tagged** and consumers pin an **exact release** (`@v1.2.0`), never `@main`. Merging to `main` publishes nothing: propagation to consumers only happens when a release is cut, and lands in each repo as a Dependabot PR validated by that repo's own CI.
+
+**Cutting a release** (after merging your PR to `main`):
+
+```bash
+gh release create v1.3.0 --generate-notes   # creates tag + GitHub Release
+```
+
+(Pushing a bare `git tag` also works — `publish-release.yml` creates the Release for you.)
+
+**Semver semantics for workflows:**
+
+| Bump | When |
+|---|---|
+| **major** (`v2.0.0`) | Breaking interface change: input/secret/output removed or renamed, new required input, behavioral contract change |
+| **minor** (`v1.3.0`) | New optional input, new feature, backwards-compatible |
+| **patch** (`v1.2.1`) | Bug fix, no interface change |
+
+**How consumers get updates:** Dependabot (`github-actions` ecosystem) opens a bump PR in each consumer repo when a new release exists. This requires Dependabot access to this private repo (org settings → Code security → Dependabot → private repository access). For an emergency, a consumer can temporarily pin a commit SHA.
+
+**The rule:** touching a shared workflow is not done until the release is cut. `@main` refs in consumers are a bug.
 
 > **SPAs**: pair these workflows with [`Dogfy-Diet/spa-base`](https://github.com/Dogfy-Diet/spa-base) as the base Docker image. That takes care of nginx, runtime config, cache headers, compression, and security headers once for every SPA — your `Dockerfile` becomes ~10 lines.
 
@@ -151,7 +175,7 @@ permissions:
 
 jobs:
   promote:
-    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       version: ${{ inputs.version }}
@@ -211,7 +235,7 @@ permissions:
 
 jobs:
   rollback:
-    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       environment: pro
@@ -451,7 +475,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@v1.0.0
     with:
       environment: stg
       service: dogfy-myapp
@@ -471,7 +495,7 @@ Each service uses a **different deployer SA** (one per service, all living in `d
 # deploy-backoffice.yml
 jobs:
   deploy-stg:
-    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@v1.0.0
     with:
       environment: stg
       service: dogfy-backoffice
@@ -487,7 +511,7 @@ jobs:
 # deploy-admin.yml — same repo, different service + SA
 jobs:
   deploy-stg:
-    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@v1.0.0
     with:
       environment: stg
       service: dogfy-admin
@@ -518,7 +542,7 @@ permissions:
 
 jobs:
   validate:
-    uses: Dogfy-Diet/.github/.github/workflows/validate.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/validate.yml@v1.0.0
     with:
       install_command: npm ci
       typecheck_command: cd apps/myapp && npm run typecheck
@@ -543,7 +567,7 @@ permissions:
 
 jobs:
   preview:
-    uses: Dogfy-Diet/.github/.github/workflows/preview-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/preview-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       sa_email: myapp-deployer@dogfy-host.iam.gserviceaccount.com
@@ -568,7 +592,7 @@ permissions:
 
 jobs:
   cleanup:
-    uses: Dogfy-Diet/.github/.github/workflows/cleanup-preview.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/cleanup-preview.yml@v1.0.0
     with:
       service: dogfy-myapp
       sa_email: myapp-deployer@dogfy-host.iam.gserviceaccount.com
@@ -594,7 +618,7 @@ permissions:
 
 jobs:
   promote:
-    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       version: ${{ inputs.version }}
@@ -624,7 +648,7 @@ permissions:
 
 jobs:
   rollback:
-    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       environment: pro
@@ -650,7 +674,7 @@ permissions:
 
 jobs:
   cleanup:
-    uses: Dogfy-Diet/.github/.github/workflows/cleanup-ar-tags.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/cleanup-ar-tags.yml@v1.0.0
     with:
       service: dogfy-myapp
       keep_last: 10

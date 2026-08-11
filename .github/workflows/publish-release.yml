@@ -1,0 +1,29 @@
+name: Publish release
+
+# Publishes a GitHub Release when a semver tag is pushed to THIS repo.
+# Normal flow: `gh release create vX.Y.Z --generate-notes` already creates
+# tag + release in one step; this workflow only covers the case where someone
+# pushes a bare tag (`git push origin vX.Y.Z`) so the release always exists
+# and Dependabot in consumer repos can pick the new version up.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists, nothing to do."
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          fi
