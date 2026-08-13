@@ -58,8 +58,8 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      released: ${{ steps.semantic.outputs.new_release_published }}
-      version: ${{ steps.semantic.outputs.new_release_version }}
+      released: ${{ steps.release-result.outputs.released }}
+      version: ${{ steps.release-result.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -118,6 +118,12 @@ jobs:
           fi
           echo "Generated default .releaserc.json (commit_changelog=${{ inputs.commit_changelog }})"
 
+      - name: Capture current release tag
+        id: before-release
+        run: |
+          TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Run semantic-release
         id: semantic
         env:
@@ -129,17 +135,34 @@ jobs:
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: npx semantic-release
 
+      # semantic-release's CLI does not emit GitHub Actions outputs. Resolve
+      # the result from the semver tag it creates on the checked-out commit.
+      - name: Resolve release result
+        id: release-result
+        env:
+          PREVIOUS_TAG: ${{ steps.before-release.outputs.tag }}
+        run: |
+          TAG=$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
+
+          if [ -n "$TAG" ] && [ "$TAG" != "$PREVIOUS_TAG" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Summary
         if: always()
         run: |
-          if [ "${{ steps.semantic.outputs.new_release_published }}" = "true" ]; then
+          if [ "${{ steps.release-result.outputs.released }}" = "true" ]; then
             cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ### Release v${{ steps.semantic.outputs.new_release_version }}
+          ### Release v${{ steps.release-result.outputs.version }}
           | | |
           |---|---|
-          | Version | v${{ steps.semantic.outputs.new_release_version }} |
+          | Version | v${{ steps.release-result.outputs.version }} |
           | Changelog committed | ${{ inputs.commit_changelog }} |
-          | Release | [GitHub Release](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.semantic.outputs.new_release_version }}) |
+          | Release | [GitHub Release](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.release-result.outputs.version }}) |
           EOF
           else
             echo "### No release needed" >> "$GITHUB_STEP_SUMMARY"
