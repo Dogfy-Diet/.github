@@ -117,7 +117,9 @@ Build + push + deploy to staging. Designed for `push: branches: [main]` with a `
 | `build_args` | no | `""` | Docker build args (multiline) |
 | `node_version` | no | `""` | Node version for optional runner-side prebuild |
 | `install_command` | no | `""` | Install command for prebuild (e.g. `npm ci`) |
-| `build_command` | no | `""` | Build command for prebuild (e.g. `npm run build`) |
+| `build_command` | no | `""` | Runner-side command before Docker; can build or materialize dynamic inputs into the context |
+| `build_secret_manager_secrets` | no | `""` | Secret Manager mappings exposed only to `build_command` (`ENV_NAME:PROJECT/SECRET`) |
+| `mutable_build_inputs` | no | `false` | Force a fresh staging build when `build_command` consumes external data that can change without a Git commit |
 | `build_cache_path` | no | `""` | Directory to cache across runs (e.g. Nuxt's `.nuxt`) |
 | `smoke_test_path` | no | `""` | Health check path. Empty = skip |
 | `cdn_host` | no | `""` | Host for CDN invalidation. Requires `vars.CDN_URL_MAP` |
@@ -127,6 +129,39 @@ Build + push + deploy to staging. Designed for `push: branches: [main]` with a `
 **Secrets:** `submodules_token` (optional, PAT for private submodules).
 
 **Outputs:** `image`, `digest`, `url`.
+
+#### Runner-side build inputs
+
+`build_command` runs on the GitHub Actions runner after authentication and
+dependency installation, but before the Docker build. Use it to write generated
+or externally managed inputs into the Docker context; keep the Dockerfile
+responsible for compiling the application.
+
+Secrets required by that command can be mapped from Secret Manager without
+adding them to Docker build arguments:
+
+```yaml
+with:
+  node_version: "22"
+  install_command: npm ci
+  build_secret_manager_secrets: |
+    EXTERNAL_API_TOKEN:dogfy-host/example-build-api-token
+  mutable_build_inputs: true
+  build_command: npm run sync-external-inputs
+```
+
+The authenticated deployer service account needs
+`roles/secretmanager.secretAccessor` on each referenced secret. Secret values
+are masked and exported only while `build_command` runs; Docker does not inherit
+them. The workflow also relocates Google's temporary WIF credentials outside the
+workspace before constructing the Docker context. Never copy a secret into the
+generated files or pass it through `build_args`.
+
+Set `mutable_build_inputs: true` whenever the command reads data that can change
+without a Git commit. Otherwise the workflow may reuse the image produced for
+the same commit's preview, which predates the latest external data. Production
+still promotes the already tested staging image by immutable digest and never
+rebuilds it.
 
 ---
 
@@ -324,7 +359,8 @@ Deploys an ephemeral PR preview using Cloud Run traffic tags. The preview gets a
 | `build_args` | no | `""` | — |
 | `node_version` | no | `""` | — |
 | `install_command` | no | `""` | — |
-| `build_command` | no | `""` | — |
+| `build_command` | no | `""` | Runner-side command before Docker; can materialize dynamic build inputs |
+| `build_secret_manager_secrets` | no | `""` | Secret Manager mappings exposed only to `build_command` (`ENV_NAME:PROJECT/SECRET`) |
 | `smoke_test_path` | no | `""` | Health check path on the preview URL |
 | `sa_email` | no | `""` | — |
 | `submodules` | no | `"false"` | — |

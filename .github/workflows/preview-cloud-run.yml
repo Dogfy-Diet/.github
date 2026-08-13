@@ -57,6 +57,15 @@ on:
       build_command:
         type: string
         default: ""
+        description: |
+          Optional runner-side command executed after install and before the
+          Docker build. It may materialize dynamic build inputs into the context.
+      build_secret_manager_secrets:
+        type: string
+        default: ""
+        description: |
+          Optional Secret Manager mappings exposed only to build_command.
+          Format: ENV_NAME:GCP_PROJECT/SECRET_NAME, one mapping per line.
       smoke_test_path:
         type: string
         default: ""
@@ -176,21 +185,65 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-build-${{ inputs.service }}-pr-${{ github.event.pull_request.number }}-
 
-      - if: inputs.build_command != ''
+      # Authenticate after dependency installation but before optional
+      # runner-side inputs need to read explicitly mapped build secrets.
+      - uses: google-github-actions/auth@v2
+        id: gcp-auth
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
+
+      - name: Keep Google credentials outside the Docker context
+        env:
+          GENERATED_CREDENTIALS_PATH: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+        run: |
+          set -euo pipefail
+          SAFE_CREDENTIALS_PATH="${RUNNER_TEMP}/gha-creds-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          mv "$GENERATED_CREDENTIALS_PATH" "$SAFE_CREDENTIALS_PATH"
+          chmod 600 "$SAFE_CREDENTIALS_PATH"
+          {
+            echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$SAFE_CREDENTIALS_PATH"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$SAFE_CREDENTIALS_PATH"
+            echo "GOOGLE_GHA_CREDS_PATH=$SAFE_CREDENTIALS_PATH"
+          } >> "$GITHUB_ENV"
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Load build secrets from Secret Manager
+        id: build-secrets
+        if: inputs.build_command != '' && inputs.build_secret_manager_secrets != ''
+        uses: google-github-actions/get-secretmanager-secrets@v3
+        with:
+          secrets: ${{ inputs.build_secret_manager_secrets }}
+          export_to_environment: false
+
+      - name: Run runner-side build command
+        if: inputs.build_command != ''
         env:
           # Exposed for builds that need to fetch private resources (e.g.
           # @nuxt/content's repository source pulling a private submodule).
           # Reuses the same PAT the caller passes via `submodules_token`.
           GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
-        run: ${{ inputs.build_command }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          BUILD_SECRETS_JSON: ${{ toJSON(steps.build-secrets.outputs) }}
+        run: |
+          set -euo pipefail
 
-      # -- Auth (WIF) -------------------------------------------------------
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
+          # Secret Manager output names become environment variables only for
+          # this step. Values remain masked and are not inherited by Docker.
+          while IFS= read -r name; do
+            if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "::error::Invalid build secret environment name: ${name}"
+              exit 1
+            fi
 
-      - uses: google-github-actions/setup-gcloud@v2
+            value=$(jq -r --arg name "$name" '.[$name]' <<< "$BUILD_SECRETS_JSON")
+            export "$name=$value"
+          done < <(jq -r '(. // {}) | keys[]' <<< "$BUILD_SECRETS_JSON")
+
+          bash -eo pipefail -c "$BUILD_COMMAND"
+
+      # -- Build ------------------------------------------------------------
       - run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
       # -- Build & push to centralized AR -----------------------------------
@@ -273,3 +326,10 @@ jobs:
             | Commit | `${{ github.sha }}` |
 
             > Preview shares staging infra (DB, secrets). No production traffic.
+
+      - name: Remove temporary Google credentials
+        if: always()
+        run: |
+          if [ -n "${GOOGLE_GHA_CREDS_PATH:-}" ]; then
+            rm -f -- "$GOOGLE_GHA_CREDS_PATH"
+          fi
