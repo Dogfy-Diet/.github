@@ -134,7 +134,7 @@ jobs:
 
       - name: Restore node_modules cache
         if: inputs.install_command != '' && inputs.cache_node_modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             node_modules
@@ -169,7 +169,7 @@ jobs:
       # previous commit of the SAME PR.
       - name: Restore build cache
         if: inputs.build_cache_path != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ inputs.build_cache_path }}
           key: ${{ runner.os }}-build-${{ inputs.service }}-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
