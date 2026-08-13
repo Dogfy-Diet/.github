@@ -126,7 +126,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
 
       # -- Optional prebuild ------------------------------------------------
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: inputs.node_version != ''
         with:
           node-version: ${{ inputs.node_version }}

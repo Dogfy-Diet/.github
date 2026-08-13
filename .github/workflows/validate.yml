@@ -100,7 +100,7 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
@@ -172,7 +172,7 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
@@ -244,7 +244,7 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
@@ -316,7 +316,7 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
@@ -388,7 +388,7 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           cache: npm
