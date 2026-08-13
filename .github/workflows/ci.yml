@@ -1,0 +1,39 @@
+# =============================================================================
+# CI of THIS repo: static validation of the reusable workflows
+# =============================================================================
+# Runs actionlint (pinned) on every PR. Actions-native checks (syntax,
+# expressions, types, needs/outputs wiring, runner labels) are strict.
+#
+# shellcheck integration is disabled for now: the current workflows carry
+# ~16 pre-existing style/info findings (SC2086/SC2129/SC2034 — the SC2034
+# ones in validate.yml are false positives, vars consumed via eval).
+# Re-enable by removing `-shellcheck=` once those are cleaned up.
+# =============================================================================
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: 1.7.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download actionlint (pinned)
+        run: |
+          bash <(curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+
+      - name: Lint workflows
+        run: ./actionlint -color -shellcheck=

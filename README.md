@@ -1,6 +1,13 @@
 # Dogfy-Diet Reusable Workflows
 
-Reusable GitHub Actions workflows shared across all Dogfy-Diet repositories. Any repo in the org can call these via `uses: Dogfy-Diet/.github/.github/workflows/<workflow>@main`.
+[![Release](https://img.shields.io/github/v/release/Dogfy-Diet/.github?logo=github&label=release&color=2ea44f)](https://github.com/Dogfy-Diet/.github/releases)
+[![Release workflow](https://github.com/Dogfy-Diet/.github/actions/workflows/release-self.yml/badge.svg)](https://github.com/Dogfy-Diet/.github/actions/workflows/release-self.yml)
+[![CI](https://github.com/Dogfy-Diet/.github/actions/workflows/ci.yml/badge.svg)](https://github.com/Dogfy-Diet/.github/actions/workflows/ci.yml)
+[![Conventional Commits](https://img.shields.io/badge/conventional%20commits-required-fe5196?logo=conventionalcommits&logoColor=white)](https://www.conventionalcommits.org/)
+[![Cloud Run](https://img.shields.io/badge/GCP-Cloud%20Run-4285F4?logo=googlecloud&logoColor=white)](https://cloud.google.com/run)
+[![WIF](https://img.shields.io/badge/auth-WIF%20·%20no%20SA%20keys-34A853?logo=googlecloud&logoColor=white)](#infrastructure-prerequisites)
+
+Reusable GitHub Actions workflows shared across all Dogfy-Diet repositories. Any repo in the org calls these **pinned to a release tag**: `uses: Dogfy-Diet/.github/.github/workflows/<workflow>@v1.0.0` — see [Versioning](#versioning--releases).
 
 These workflows implement Dogfy's **trunk-based delivery model** — build once on merge to main, deploy immediately to staging, promote the exact same image digest to production on demand, roll back by traffic shift.
 
@@ -53,6 +60,33 @@ These workflows implement Dogfy's **trunk-based delivery model** — build once 
 | [`rollback-cloud-run.yml`](.github/workflows/rollback-cloud-run.yml) | `workflow_dispatch` | traffic shift or specific-tag redeploy |
 | [`release.yml`](.github/workflows/release.yml) | push to main | semantic-release tagging + GitHub Release |
 | [`cleanup-ar-tags.yml`](.github/workflows/cleanup-ar-tags.yml) | cron weekly | prune stale `sha-*` AR tags |
+
+This repo also has automation **of its own** (not reusable — it runs here):
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| [`release-self.yml`](.github/workflows/release-self.yml) | push to `main` | semver release of **this repo** (tag `vX.Y.Z` + GitHub Release + floating `v1`) |
+| [`ci.yml`](.github/workflows/ci.yml) | PR | actionlint on all workflows |
+| [`dependabot.yml`](.github/dependabot.yml) | weekly | bumps third-party actions used by these workflows |
+
+---
+
+## Versioning & releases
+
+This repo versions **itself** so consumers can pin instead of tracking `@main`:
+
+- Every push to `main` runs [`release-self.yml`](.github/workflows/release-self.yml), which dogfoods our own reusable [`release.yml`](.github/workflows/release.yml) (semantic-release).
+- **Conventional commits drive the bump**: `feat:` → minor, `fix:` → patch, `feat!:` / `BREAKING CHANGE` → major, `chore/docs/ci/refactor` → no release. If a PR is **squash-merged, the PR title is the commit** — write it as a conventional commit.
+- Each release creates an immutable tag `vX.Y.Z` + a [GitHub Release](https://github.com/Dogfy-Diet/.github/releases) with generated notes, and moves the floating major tag (`v1`).
+- Any change to a workflow's **inputs/secrets/outputs contract** that breaks existing callers must be `feat!:` (major).
+
+**How consumers stay up to date:**
+
+| Strategy | Reference | Who bumps it |
+|---|---|---|
+| Recommended | `@v1.0.0` (exact tag) | Dependabot (`github-actions` ecosystem) opens a PR on each release |
+| No Dependabot | `@v1` (floating major) | Moves automatically on every `v1.x.y` release; majors are still opt-in |
+| Discouraged | `@main` | Nobody — you get every change immediately, including breaking ones |
 
 ---
 
@@ -151,7 +185,7 @@ permissions:
 
 jobs:
   promote:
-    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       version: ${{ inputs.version }}
@@ -211,7 +245,7 @@ permissions:
 
 jobs:
   rollback:
-    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       environment: pro
@@ -319,7 +353,7 @@ Removes the Cloud Run traffic tag and the AR `pr-N` tag when a PR is closed. Wit
 
 ### [`release.yml`](.github/workflows/release.yml)
 
-Automates semantic versioning, changelog, and GitHub Releases using [semantic-release](https://github.com/semantic-release/semantic-release). Analyzes conventional commits since the last tag to determine the version bump.
+Automates semantic versioning, changelog, and GitHub Releases using [semantic-release](https://github.com/semantic-release/semantic-release). Analyzes conventional commits since the last tag to determine the version bump. This repo [dogfoods it](.github/workflows/release-self.yml) to cut its own releases.
 
 ```
 feat: add export button     → minor (1.x.0)
@@ -451,7 +485,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@v1.0.0
     with:
       environment: stg
       service: dogfy-myapp
@@ -471,7 +505,7 @@ Each service uses a **different deployer SA** (one per service, all living in `d
 # deploy-backoffice.yml
 jobs:
   deploy-stg:
-    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@v1.0.0
     with:
       environment: stg
       service: dogfy-backoffice
@@ -487,7 +521,7 @@ jobs:
 # deploy-admin.yml — same repo, different service + SA
 jobs:
   deploy-stg:
-    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@v1.0.0
     with:
       environment: stg
       service: dogfy-admin
@@ -518,7 +552,7 @@ permissions:
 
 jobs:
   validate:
-    uses: Dogfy-Diet/.github/.github/workflows/validate.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/validate.yml@v1.0.0
     with:
       install_command: npm ci
       typecheck_command: cd apps/myapp && npm run typecheck
@@ -543,7 +577,7 @@ permissions:
 
 jobs:
   preview:
-    uses: Dogfy-Diet/.github/.github/workflows/preview-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/preview-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       sa_email: myapp-deployer@dogfy-host.iam.gserviceaccount.com
@@ -568,7 +602,7 @@ permissions:
 
 jobs:
   cleanup:
-    uses: Dogfy-Diet/.github/.github/workflows/cleanup-preview.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/cleanup-preview.yml@v1.0.0
     with:
       service: dogfy-myapp
       sa_email: myapp-deployer@dogfy-host.iam.gserviceaccount.com
@@ -594,7 +628,7 @@ permissions:
 
 jobs:
   promote:
-    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/promote-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       version: ${{ inputs.version }}
@@ -624,7 +658,7 @@ permissions:
 
 jobs:
   rollback:
-    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/rollback-cloud-run.yml@v1.0.0
     with:
       service: dogfy-myapp
       environment: pro
@@ -650,7 +684,7 @@ permissions:
 
 jobs:
   cleanup:
-    uses: Dogfy-Diet/.github/.github/workflows/cleanup-ar-tags.yml@main
+    uses: Dogfy-Diet/.github/.github/workflows/cleanup-ar-tags.yml@v1.0.0
     with:
       service: dogfy-myapp
       keep_last: 10

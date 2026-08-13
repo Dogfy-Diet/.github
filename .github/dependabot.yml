@@ -1,0 +1,16 @@
+# Dependabot: mantiene al día las actions de terceros que usan los workflows
+# de este repo (actions/checkout, actions/setup-node, ...). Mismo esquema que
+# el resto de repos de la org (PTF-319): semanal, lunes 07:00 Europe/Madrid.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/Madrid"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 5

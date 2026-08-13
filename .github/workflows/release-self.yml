@@ -1,0 +1,75 @@
+# =============================================================================
+# SELF-RELEASE: versioning of THIS repo (Dogfy-Diet/.github)
+# =============================================================================
+# The reusable workflows in this repo are consumed by every other Dogfy repo
+# pinned to a release tag (e.g. @v1.0.0), with Dependabot proposing bumps.
+# For that to work, THIS repo must cut proper semver releases — that's what
+# this workflow does, dogfooding our own reusable release.yml.
+#
+# On every push to main:
+#   1. semantic-release analyzes conventional commits since the last tag
+#      (feat → minor, fix → patch, feat!/BREAKING CHANGE → major,
+#       chore/docs/ci/refactor → no release)
+#   2. If releasable: creates tag vX.Y.Z + GitHub Release with notes
+#   3. Moves the floating major tag (v1) to the new release, so repos
+#      without Dependabot can track @v1
+#
+# NOTE: if a PR is squash-merged, the PR TITLE becomes the commit that
+# semantic-release analyzes — it must be a conventional commit message.
+# =============================================================================
+name: Release .github
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-self
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Semantic release
+    # Dogfooding: this repo releases itself with its own reusable workflow.
+    uses: ./.github/workflows/release.yml
+    with:
+      # No CHANGELOG.md commit: release notes live in GitHub Releases,
+      # and this repo has no package.json to version.
+      commit_changelog: false
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+  major-tag:
+    name: Move floating major tag
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Point vN at v${{ needs.release.outputs.version }}
+        run: |
+          VERSION="v${{ needs.release.outputs.version }}"
+          MAJOR="${VERSION%%.*}"
+          git fetch --tags --force origin
+          git tag -f "$MAJOR" "$VERSION"
+          git push --force origin "refs/tags/$MAJOR"
+          {
+            echo "### Floating tag updated"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release | \`$VERSION\` |"
+            echo "| Floating tag | \`$MAJOR\` → \`$VERSION\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
