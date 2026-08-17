@@ -119,6 +119,12 @@ jobs:
       pull-requests: read
 
     steps:
+      # Check out the caller's exact event commit so the target tree does not
+      # depend on GitHub's REST commit index. This matters when main is not the
+      # default branch: a fresh direct/bypassed main commit can be fetchable by
+      # Git while the Git objects REST endpoint still returns 404.
+      - uses: actions/checkout@v4
+
       # ================================================================
       # AUTH
       # ================================================================
@@ -357,14 +363,12 @@ jobs:
             IMAGE_TREE_SOURCE="revision fallback"
           fi
 
-          TARGET_TREE=$(gh api \
-            "repos/${{ github.repository }}/git/commits/${{ github.sha }}" \
-            --jq '.tree.sha' 2>/dev/null || true)
+          TARGET_TREE=$(git rev-parse 'HEAD^{tree}' 2>/dev/null || true)
 
-          # On an API error `gh api` may emit the JSON error body to stdout
-          # even though the command failed. Treat only full Git object IDs as
-          # resolved trees so an inaccessible/non-existent revision gets the
-          # intended remediation message instead of a misleading mismatch.
+          # On a fallback API error `gh api` may emit the JSON error body to
+          # stdout even though the command failed. Treat only full Git object
+          # IDs as resolved trees so an inaccessible/non-existent revision
+          # gets the intended remediation message instead of a mismatch.
           if ! [[ "$IMAGE_TREE" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$TARGET_TREE" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Cannot resolve Git trees (image revision=${IMAGE_REVISION}, target=${GITHUB_SHA})"
             exit 1
