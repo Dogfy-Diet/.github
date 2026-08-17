@@ -249,9 +249,11 @@ jobs:
 
       # ================================================================
       # EXACT-TREE PROVENANCE GUARD — PTF-302
-      # Read the built commit from the already-pinned source digest's OCI
-      # labels, resolve both commits to full Git tree hashes, and require
-      # equality. Comparing trees (not commit ancestry) is intentional:
+      # Read the built commit and exact checked-out tree from the already-
+      # pinned source digest's OCI labels, resolve the target commit tree, and
+      # require equality. Older images without io.dogfy.git.tree fall back to
+      # resolving their revision commit. Comparing trees (not ancestry) is
+      # intentional:
       # squash/merge commits may have different IDs while representing the
       # same content, whereas an ancestor image may still omit a production
       # hotfix or contain a different synthetic PR merge.
@@ -295,6 +297,28 @@ jobs:
             ' <<< "$IMAGE_JSON"
           }
 
+          # The durable tree label was added after the revision guard. An
+          # entirely absent value is therefore allowed for backward
+          # compatibility, but a partially labelled/inconsistent index is not.
+          read_optional_consistent_label() {
+            local label="$1"
+            jq -er --arg label "$label" '
+              (if has("config") then [.]
+               else [.[] | select(type == "object" and has("config"))]
+               end) as $images
+              | [$images[].config.Labels[$label] // ""] as $values
+              | if ($values | length) == 0
+                then error("no image configs")
+                elif all($values[]; . == "")
+                then ""
+                elif any($values[]; . == "")
+                     or (($values | unique | length) != 1)
+                then error("inconsistent optional OCI label: " + $label)
+                else $values[0]
+                end
+            ' <<< "$IMAGE_JSON"
+          }
+
           if ! IMAGE_REVISION=$(read_consistent_label 'org.opencontainers.image.revision'); then
             echo "::error::Cannot verify provenance for ${SRC_DIGEST:0:19}...: missing or inconsistent org.opencontainers.image.revision label"
             exit 1
@@ -315,9 +339,24 @@ jobs:
             exit 1
           fi
 
-          IMAGE_TREE=$(gh api \
-            "repos/${{ github.repository }}/git/commits/${IMAGE_REVISION}" \
-            --jq '.tree.sha' 2>/dev/null || true)
+          if ! IMAGE_TREE=$(read_optional_consistent_label 'io.dogfy.git.tree'); then
+            echo "::error::Cannot verify provenance for ${SRC_DIGEST:0:19}...: inconsistent io.dogfy.git.tree label"
+            exit 1
+          fi
+
+          if [ -n "$IMAGE_TREE" ]; then
+            if ! [[ "$IMAGE_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Image tree label is not a full Git tree SHA: '${IMAGE_TREE}'"
+              exit 1
+            fi
+            IMAGE_TREE_SOURCE="image label"
+          else
+            IMAGE_TREE=$(gh api \
+              "repos/${{ github.repository }}/git/commits/${IMAGE_REVISION}" \
+              --jq '.tree.sha' 2>/dev/null || true)
+            IMAGE_TREE_SOURCE="revision fallback"
+          fi
+
           TARGET_TREE=$(gh api \
             "repos/${{ github.repository }}/git/commits/${{ github.sha }}" \
             --jq '.tree.sha' 2>/dev/null || true)
@@ -341,7 +380,7 @@ jobs:
             echo "image_tree=${IMAGE_TREE}"
             echo "target_tree=${TARGET_TREE}"
           } >> "$GITHUB_OUTPUT"
-          echo "Provenance OK: ${SRC_DIGEST:0:19}... was built from ${IMAGE_REVISION:0:12}; tree ${IMAGE_TREE:0:12} exactly matches ${GITHUB_SHA:0:12}"
+          echo "Provenance OK: ${SRC_DIGEST:0:19}... was built from ${IMAGE_REVISION:0:12}; tree ${IMAGE_TREE:0:12} (${IMAGE_TREE_SOURCE}) exactly matches ${GITHUB_SHA:0:12}"
 
       # ================================================================
       # CAPTURE CURRENT PRO-LATEST DIGEST
