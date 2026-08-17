@@ -322,7 +322,11 @@ jobs:
             "repos/${{ github.repository }}/git/commits/${{ github.sha }}" \
             --jq '.tree.sha' 2>/dev/null || true)
 
-          if [ -z "$IMAGE_TREE" ] || [ -z "$TARGET_TREE" ]; then
+          # On an API error `gh api` may emit the JSON error body to stdout
+          # even though the command failed. Treat only full Git object IDs as
+          # resolved trees so an inaccessible/non-existent revision gets the
+          # intended remediation message instead of a misleading mismatch.
+          if ! [[ "$IMAGE_TREE" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$TARGET_TREE" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Cannot resolve Git trees (image revision=${IMAGE_REVISION}, target=${GITHUB_SHA})"
             exit 1
           fi
