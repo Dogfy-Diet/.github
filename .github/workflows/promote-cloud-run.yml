@@ -6,12 +6,13 @@
 #
 # Digest-first flow:
 #   1. Resolve user input → source tag → source digest (ONCE, upfront)
-#   2. Capture current pro-latest digest (for pro-previous backup on success)
-#   3. Capture currently-serving Cloud Run revision (for auto-rollback)
-#   4. Deploy Cloud Run by digest (tags are not touched yet)
-#   5. Smoke test
-#   6. Only on success: move pro-latest, pro-previous, and semver tags.
-#   7. On failure: shift Cloud Run traffic back to the saved revision;
+#   2. Verify the digest's OCI source revision tree == github.sha tree
+#   3. Capture current pro-latest digest (for pro-previous backup on success)
+#   4. Capture currently-serving Cloud Run revision (for auto-rollback)
+#   5. Deploy Cloud Run by digest (tags are not touched yet)
+#   6. Smoke test
+#   7. Only on success: move pro-latest, pro-previous, and semver tags.
+#   8. On failure: shift Cloud Run traffic back to the saved revision;
 #      tags remain untouched, so AR state == what's actually running.
 #
 # Why digest-first: between 'read stg-latest' and 'write pro-latest' a
@@ -25,16 +26,16 @@
 #   - AR tag (sha-b075fa6, stg-latest, pro-previous) → used as-is
 #   - Empty on a push event → auto-resolve by merge provenance (PTF-302):
 #       hotfix/feature PR merge → the PR's own commit-bound preview image
-#       (pr-<N>-<sha7>, trusted per ADR-015); release-sprint-* merge or
-#       direct push → stg-latest, gated by the provenance guard.
+#       (pr-<N>-<sha7>); release-sprint-* merge → the release head's
+#       commit-bound image (sha-<sha7>); direct push → sha-<github.sha7>.
 #
-# Provenance guard (PTF-302): on non-trunk repos staging deploys from
-# release-sprint-* branches, so on a push to main `stg-latest` is NOT
-# necessarily built from main — promoting it after a hotfix merge ships
-# the in-flight sprint. Whenever the resolved source is stg-latest on a
-# push event, the commit it was built from must be an ancestor of
-# github.sha, or the promote fails red. workflow_dispatch skips the
-# guard (manual escape hatch) with a warning.
+# Exact-tree provenance guard (PTF-302): every source tag is first pinned to
+# a digest. The OCI revision label is then read from that exact digest and
+# both the image revision and github.sha are resolved to their full Git tree
+# hashes. Production is touched only when those trees are identical. This
+# catches mutable-tag drift, an in-flight release, and (critically) a stale PR
+# preview built before the PR base changed from release to main. The guard is
+# fail-closed and also applies to workflow_dispatch.
 #
 # Features:
 #   - Pre-deploy context: shows source vs production image comparison
@@ -65,7 +66,7 @@ on:
         required: false
         default: ""
         type: string
-        description: "Version to promote. Accepts: commit hash (b075fa6), semver (v1.4.0 or 1.4.0), tag (stg-latest, sha-b075fa6). Empty on a push event = auto-resolve by merge provenance (see header)."
+        description: "Version to promote. Accepts: commit hash (b075fa6), semver (v1.4.0 or 1.4.0), tag (stg-latest, sha-b075fa6). Empty is only valid on a push event, where merge provenance is auto-resolved."
       environment:
         type: string
         default: "production"
@@ -90,6 +91,8 @@ on:
         value: ${{ jobs.promote.outputs.image }}
       digest:
         value: ${{ jobs.promote.outputs.digest }}
+      tree:
+        value: ${{ jobs.promote.outputs.tree }}
       url:
         value: ${{ jobs.promote.outputs.url }}
 
@@ -104,14 +107,15 @@ jobs:
     outputs:
       image: ${{ steps.src.outputs.ar_image }}
       digest: ${{ steps.src.outputs.digest }}
+      tree: ${{ steps.provenance.outputs.image_tree }}
       url: ${{ steps.url.outputs.url }}
     permissions:
       contents: read
       id-token: write
       deployments: write
       # Needed by the auto-resolve step (commits/{sha}/pulls). Callers must
-      # grant it too — a caller without it degrades gracefully: auto-resolve
-      # fails to find the PR and falls back to stg-latest + provenance guard.
+      # grant it too. If PR metadata is unavailable, auto-resolution falls
+      # back to the commit-bound sha-<github.sha7> tag, never to stg-latest.
       pull-requests: read
 
     steps:
@@ -129,13 +133,16 @@ jobs:
       # AUTO-RESOLVE SOURCE (push event, no explicit version) — PTF-302
       # Decides WHAT a push to main should promote, by merge provenance:
       #   - Hotfix/feature PR merge → the PR's own commit-bound preview
-      #     image pr-<N>-<sha7> (trusted per ADR-015), after proving the
-      #     PR head tree == the merge commit tree. NOT stg-latest, which
-      #     on non-trunk repos points at the in-flight sprint.
-      #   - Release merge (release-sprint-*) → stg-latest: that exact
-      #     digest is what was validated on staging. The provenance
-      #     guard below proves it is now an ancestor of main.
-      #   - No PR found (direct push) → stg-latest + provenance guard.
+      #     image pr-<N>-<sha7>. NOT stg-latest, which on non-trunk repos
+      #     points at the in-flight sprint.
+      #   - Release merge (release-sprint-*) → sha-<release-head-sha7>,
+      #     the immutable commit-bound alias created by the staging deploy.
+      #   - No PR found (direct push) → sha-<github.sha7>. This normally
+      #     does not exist and therefore fails closed before deployment.
+      #
+      # Source selection is not trusted on its own. The exact-tree guard
+      # below proves that the selected digest's built revision has the same
+      # complete repository tree as github.sha.
       # ================================================================
       - name: Auto-resolve source (push)
         id: auto
@@ -146,8 +153,9 @@ jobs:
           PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
             --jq '[.[] | select(.merge_commit_sha == "${{ github.sha }}")][0] // empty' 2>/dev/null || true)
           if [ -z "$PR" ]; then
-            echo "No merged PR found for ${GITHUB_SHA:0:7} (direct push?) — falling back to stg-latest; the provenance guard must pass"
-            echo "src_tag=stg-latest" >> "$GITHUB_OUTPUT"
+            BOUND_TAG="sha-${GITHUB_SHA:0:7}"
+            echo "No merged PR found for ${GITHUB_SHA:0:7} (direct push?) — requiring commit-bound image ${BOUND_TAG}"
+            echo "src_tag=${BOUND_TAG}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           PR_NUMBER=$(echo "$PR" | jq -r '.number')
@@ -155,19 +163,10 @@ jobs:
           HEAD_REF=$(echo "$PR" | jq -r '.head.ref')
 
           if echo "$HEAD_REF" | grep -qE '^release-sprint-'; then
-            echo "PR #${PR_NUMBER} is a release merge (${HEAD_REF}) — promoting stg-latest (the digest validated on staging); the provenance guard will verify it"
-            echo "src_tag=stg-latest" >> "$GITHUB_OUTPUT"
+            BOUND_TAG="sha-$(echo "$HEAD_SHA" | cut -c1-7)"
+            echo "PR #${PR_NUMBER} is a release merge (${HEAD_REF}) — promoting its commit-bound staging image ${BOUND_TAG}"
+            echo "src_tag=${BOUND_TAG}" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
-
-          # Hotfix/feature merge: ship the PR's own image. Tree equality
-          # proves that image's content == what main now holds; it fails
-          # when main had commits the PR branch lacked (back-merge needed).
-          MERGE_TREE=$(gh api "repos/${{ github.repository }}/git/commits/${{ github.sha }}" --jq '.tree.sha')
-          HEAD_TREE=$(gh api "repos/${{ github.repository }}/git/commits/${HEAD_SHA}" --jq '.tree.sha')
-          if [ "$MERGE_TREE" != "$HEAD_TREE" ]; then
-            echo "::error::PR #${PR_NUMBER} head tree (${HEAD_TREE:0:12}) != merge commit tree (${MERGE_TREE:0:12}) — main contains changes the PR image was not built from. Back-merge main into ${HEAD_REF} and re-merge, or promote a known-good image via workflow_dispatch."
-            exit 1
           fi
 
           BOUND_TAG="pr-${PR_NUMBER}-$(echo "$HEAD_SHA" | cut -c1-7)"
@@ -182,15 +181,17 @@ jobs:
       #   1.4.0 / v1.4.0             → src_tag=stg-latest     is_semver=true  semver_tag=v1.4.0
       #   sha-b075fa6                → src_tag=sha-b075fa6    is_semver=false
       #   stg-latest / pro-previous  → src_tag=<as-is>        is_semver=false
-      # Precedence: auto-resolved source (push) > explicit input >
-      # stg-latest (dispatch with empty input).
+      # Precedence: auto-resolved source (push) > explicit input.
+      # An empty workflow_dispatch is rejected: production never silently
+      # falls back to a mutable tag.
       # ================================================================
       - name: Resolve version
         id: version
         run: |
           RAW="${{ steps.auto.outputs.src_tag || inputs.version }}"
           if [ -z "$RAW" ]; then
-            RAW="stg-latest"
+            echo "::error::A source version is required outside an auto-resolved push event; refusing implicit stg-latest"
+            exit 1
           fi
 
           if echo "$RAW" | grep -qE '^[0-9a-f]{7,40}$'; then
@@ -207,9 +208,11 @@ jobs:
             SEMVER_TAG=""
           fi
 
-          echo "src_tag=${SRC_TAG}" >> "$GITHUB_OUTPUT"
-          echo "is_semver=${IS_SEMVER}" >> "$GITHUB_OUTPUT"
-          echo "semver_tag=${SEMVER_TAG}" >> "$GITHUB_OUTPUT"
+          {
+            echo "src_tag=${SRC_TAG}"
+            echo "is_semver=${IS_SEMVER}"
+            echo "semver_tag=${SEMVER_TAG}"
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved: input='${RAW}' → src_tag=${SRC_TAG} is_semver=${IS_SEMVER} semver_tag=${SEMVER_TAG:-none}"
 
       # ================================================================
@@ -236,52 +239,105 @@ jobs:
             esac
             exit 1
           fi
+          if ! [[ "$SRC_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Artifact Registry returned an invalid digest for ${SRC_TAG}"
+            exit 1
+          fi
           echo "ar_image=${AR_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "digest=${SRC_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Source: ${AR_IMAGE}:${SRC_TAG} @ ${SRC_DIGEST}"
 
       # ================================================================
-      # PROVENANCE GUARD (stg-latest source only) — PTF-302
-      # stg-latest is a mutable tag fed from release-sprint-* branches.
-      # Before shipping it on a push event, prove the commit it was built
-      # from is an ancestor of github.sha — i.e. main already contains
-      # everything inside that image. A hotfix merged while a sprint is
-      # in flight fails here (red) instead of silently publishing
-      # unreleased work. workflow_dispatch skips the check (manual
-      # escape hatch) with a warning. Runs BEFORE anything is deployed.
+      # EXACT-TREE PROVENANCE GUARD — PTF-302
+      # Read the built commit from the already-pinned source digest's OCI
+      # labels, resolve both commits to full Git tree hashes, and require
+      # equality. Comparing trees (not commit ancestry) is intentional:
+      # squash/merge commits may have different IDs while representing the
+      # same content, whereas an ancestor image may still omit a production
+      # hotfix or contain a different synthetic PR merge.
+      #
+      # This guard applies to every source tag and every event, including
+      # workflow_dispatch. Missing/ambiguous labels or inaccessible commits
+      # fail closed. It runs before Cloud Run or production tags are touched.
       # ================================================================
-      - name: Provenance guard (stg-latest)
-        if: steps.version.outputs.src_tag == 'stg-latest'
+      - name: Verify exact source tree
+        id: provenance
         env:
           GH_TOKEN: ${{ github.token }}
           AR_IMAGE: ${{ steps.src.outputs.ar_image }}
           SRC_DIGEST: ${{ steps.src.outputs.digest }}
         run: |
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "::warning::Provenance guard skipped (${{ github.event_name }}): promoting stg-latest without verifying it descends from ${GITHUB_SHA:0:7}"
-            exit 0
-          fi
-          # tags list gives one TAG,VERSION(digest) row per tag — unlike
-          # `images list --filter digest=`, which returns empty (server-side
-          # digest filtering silently doesn't match).
-          SRC_SHA_TAG=$(gcloud artifacts docker tags list "${AR_IMAGE}" \
-            --format='csv[no-heading](tag,version)' 2>/dev/null \
-            | awk -F',' -v d="${SRC_DIGEST}" '$2==d && $1 ~ /^sha-/ {print $1; exit}')
-          if [ -z "$SRC_SHA_TAG" ]; then
-            echo "::error::Cannot verify provenance: digest ${SRC_DIGEST:0:19}... carries no sha-* tag. If this image is known-good, promote it explicitly via workflow_dispatch."
+          set -euo pipefail
+
+          REGISTRY_HOST="${AR_IMAGE%%/*}"
+          gcloud auth configure-docker "$REGISTRY_HOST" --quiet
+
+          IMAGE_JSON=$(docker buildx imagetools inspect \
+            "${AR_IMAGE}@${SRC_DIGEST}" \
+            --format '{{json .Image}}')
+
+          # docker/build-push-action can publish either a single image config
+          # or an index keyed by platform. Require every platform to carry the
+          # same non-empty label; a partially labelled index is not trusted.
+          read_consistent_label() {
+            local label="$1"
+            jq -er --arg label "$label" '
+              (if has("config") then [.]
+               else [.[] | select(type == "object" and has("config"))]
+               end) as $images
+              | [$images[].config.Labels[$label] // ""] as $values
+              | if ($values | length) == 0
+                   or any($values[]; . == "")
+                   or (($values | unique | length) != 1)
+                then error("missing or inconsistent OCI label: " + $label)
+                else $values[0]
+                end
+            ' <<< "$IMAGE_JSON"
+          }
+
+          if ! IMAGE_REVISION=$(read_consistent_label 'org.opencontainers.image.revision'); then
+            echo "::error::Cannot verify provenance for ${SRC_DIGEST:0:19}...: missing or inconsistent org.opencontainers.image.revision label"
             exit 1
           fi
-          SRC_COMMIT="${SRC_SHA_TAG#sha-}"
-          STATUS=$(gh api "repos/${{ github.repository }}/compare/${SRC_COMMIT}...${{ github.sha }}" --jq '.status' 2>/dev/null || echo "unknown")
-          case "$STATUS" in
-            identical|ahead)
-              echo "Provenance OK: stg-latest built from ${SRC_COMMIT}, an ancestor of ${GITHUB_SHA:0:7} (compare: ${STATUS})"
-              ;;
-            *)
-              echo "::error::stg-latest was built from ${SRC_COMMIT}, which is NOT an ancestor of ${GITHUB_SHA:0:7} (compare: ${STATUS}). Promoting it would ship commits that are not on main (in-flight sprint?). Merge a release, or promote a specific image via workflow_dispatch."
-              exit 1
-              ;;
-          esac
+          if ! [[ "$IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Image revision label is not a full Git commit SHA: '${IMAGE_REVISION}'"
+            exit 1
+          fi
+
+          if ! IMAGE_SOURCE=$(read_consistent_label 'org.opencontainers.image.source'); then
+            echo "::error::Cannot verify provenance for ${SRC_DIGEST:0:19}...: missing or inconsistent org.opencontainers.image.source label"
+            exit 1
+          fi
+
+          EXPECTED_SOURCE="https://github.com/${{ github.repository }}"
+          if [ "$IMAGE_SOURCE" != "$EXPECTED_SOURCE" ]; then
+            echo "::error::Image source '${IMAGE_SOURCE}' does not match '${EXPECTED_SOURCE}'"
+            exit 1
+          fi
+
+          IMAGE_TREE=$(gh api \
+            "repos/${{ github.repository }}/git/commits/${IMAGE_REVISION}" \
+            --jq '.tree.sha' 2>/dev/null || true)
+          TARGET_TREE=$(gh api \
+            "repos/${{ github.repository }}/git/commits/${{ github.sha }}" \
+            --jq '.tree.sha' 2>/dev/null || true)
+
+          if [ -z "$IMAGE_TREE" ] || [ -z "$TARGET_TREE" ]; then
+            echo "::error::Cannot resolve Git trees (image revision=${IMAGE_REVISION}, target=${GITHUB_SHA})"
+            exit 1
+          fi
+
+          if [ "$IMAGE_TREE" != "$TARGET_TREE" ]; then
+            echo "::error::Artifact tree mismatch: image ${IMAGE_REVISION:0:12} has tree ${IMAGE_TREE:0:12}, but target ${GITHUB_SHA:0:12} has tree ${TARGET_TREE:0:12}. Production was not changed."
+            exit 1
+          fi
+
+          {
+            echo "image_revision=${IMAGE_REVISION}"
+            echo "image_tree=${IMAGE_TREE}"
+            echo "target_tree=${TARGET_TREE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Provenance OK: ${SRC_DIGEST:0:19}... was built from ${IMAGE_REVISION:0:12}; tree ${IMAGE_TREE:0:12} exactly matches ${GITHUB_SHA:0:12}"
 
       # ================================================================
       # CAPTURE CURRENT PRO-LATEST DIGEST
@@ -313,6 +369,8 @@ jobs:
           SRC_DIGEST: ${{ steps.src.outputs.digest }}
           PREV_DIGEST: ${{ steps.prev.outputs.digest }}
           SRC_TAG: ${{ steps.version.outputs.src_tag }}
+          IMAGE_REVISION: ${{ steps.provenance.outputs.image_revision }}
+          VERIFIED_TREE: ${{ steps.provenance.outputs.image_tree }}
         run: |
           # Find the sha-* tag that matches each digest (for human-readable context)
           find_sha_tag() {
@@ -341,6 +399,11 @@ jobs:
           |---|---|---|
           | Source | \`${SRC_SHA}\` | \`${SRC_DIGEST:0:19}...\` |
           | Production | \`${PRO_SHA}\` | \`${PREV_DIGEST:0:19}...\` |
+
+          | Provenance | Verified value |
+          |---|---|
+          | Image revision | \`${IMAGE_REVISION:0:12}\` |
+          | Exact Git tree | \`${VERIFIED_TREE}\` |
 
           ${SYNC_STATUS}
 
@@ -524,8 +587,8 @@ jobs:
             --arg env "$ENVIRONMENT" \
             --arg desc "$DESCRIPTION" \
             '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: []}' \
-            | gh api repos/${{ github.repository }}/deployments --input - --jq '.id')
-          gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
+            | gh api "repos/${{ github.repository }}/deployments" --input - --jq '.id')
+          gh api "repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses" \
             -f state=success \
             -f environment_url="$ENVIRONMENT_URL" \
             -f description="$DESCRIPTION"
@@ -545,6 +608,8 @@ jobs:
           | URL | ${{ steps.url.outputs.url }} |
           | Version input | \`${{ inputs.version || '(auto)' }}\` |
           | Resolved source | \`${{ steps.version.outputs.src_tag }}\` |
+          | Image revision | \`${{ steps.provenance.outputs.image_revision }}\` |
+          | Verified Git tree | \`${{ steps.provenance.outputs.image_tree }}\` |
           | Semver applied | ${{ steps.version.outputs.semver_tag || '(none)' }} |
           | CDN Invalidation | ${{ inputs.cdn_host || 'skipped' }} |
           EOF
