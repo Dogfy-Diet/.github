@@ -133,7 +133,7 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v3
 
       # ================================================================
       # AUTO-RESOLVE SOURCE (push event, no explicit version) — PTF-302
