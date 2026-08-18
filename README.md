@@ -58,6 +58,7 @@ These workflows implement Dogfy's **trunk-based delivery model** — build once 
 | [`deploy-cloud-run.yml`](.github/workflows/deploy-cloud-run.yml) | push to main (or `workflow_dispatch`) | build + push + deploy stg + smoke + CDN invalidate |
 | [`promote-cloud-run.yml`](.github/workflows/promote-cloud-run.yml) | `workflow_dispatch` | retag stg-latest → pro-latest/pro-previous + deploy pro (zero rebuild) |
 | [`rollback-cloud-run.yml`](.github/workflows/rollback-cloud-run.yml) | `workflow_dispatch` | traffic shift or specific-tag redeploy |
+| [`notify-deployment.yml`](.github/workflows/notify-deployment.yml) | called after deploy/promote/rollback | render and optionally post the standard Slack release message |
 | [`release.yml`](.github/workflows/release.yml) | push to main | semantic-release tagging + GitHub Release |
 | [`cleanup-ar-tags.yml`](.github/workflows/cleanup-ar-tags.yml) | cron weekly | prune stale `sha-*` AR tags |
 
@@ -87,6 +88,58 @@ This repo versions **itself** so consumers can pin instead of tracking `@main`:
 | Recommended | `@v1.0.0` (exact tag) | Dependabot (`github-actions` ecosystem) opens a PR on each release |
 | No Dependabot | `@v1` (floating major) | Moves automatically on every `v1.x.y` release; majors are still opt-in |
 | Discouraged | `@main` | Nobody — you get every change immediately, including breaking ones |
+
+---
+
+### [`notify-deployment.yml`](.github/workflows/notify-deployment.yml)
+
+Renders the standard Block Kit message for `#tech-sw-releases`. It supports
+staging deploys, production promotions, blocked promotions, and rollbacks.
+
+The workflow is safe to install before Slack is configured:
+
+- `dry_run: true` renders the complete payload into the GitHub step summary.
+- A missing bot token or channel ID also renders only; Slack is not contacted.
+- A Slack API outage emits a warning but never changes the deployment result.
+- Messages carry commit, Git tree, image digest, provenance, smoke-test state,
+  traffic state, PR/Jira links, and the GitHub run.
+
+Call it as a separate job after the deploy job so `if: always()` can report
+both success and failure:
+
+```yaml
+jobs:
+  deploy:
+    uses: Dogfy-Diet/.github/.github/workflows/deploy-cloud-run.yml@<immutable-sha>
+    with:
+      environment: stg
+      service: dogfy-myapp
+
+  notify:
+    needs: deploy
+    if: ${{ always() }}
+    uses: Dogfy-Diet/.github/.github/workflows/notify-deployment.yml@<immutable-sha>
+    with:
+      service: dogfy-myapp
+      environment: stg
+      operation: deploy
+      status: ${{ needs.deploy.result }}
+      commit: ${{ github.sha }}
+      image_digest: ${{ needs.deploy.outputs.digest }}
+      service_url: ${{ needs.deploy.outputs.url }}
+      smoke_test_status: ${{ needs.deploy.result == 'success' && 'passed' || 'failed' }}
+      traffic_changed: ${{ needs.deploy.result == 'success' }}
+    secrets:
+      slack_bot_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
+```
+
+The channel ID comes from the organization/repository variable
+`SLACK_RELEASES_CHANNEL_ID`, or from the explicit `channel_id` input. The bot
+only needs `chat:write` and should be invited to the target channel.
+
+Previews are intentionally excluded from this workflow. Their URL and status
+belong in the pull-request comment; a separate preview feed can be added later
+without polluting the release channel.
 
 ---
 

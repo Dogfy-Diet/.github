@@ -1,0 +1,340 @@
+# =============================================================================
+# REUSABLE WORKFLOW: DEPLOYMENT NOTIFICATION
+# =============================================================================
+# Renders one compact Slack Block Kit message for a completed deployment,
+# promotion, rollback, or blocked production attempt.
+#
+# The workflow is deliberately transport-optional:
+#   - With dry_run=true (or without Slack credentials), it renders the exact
+#     message into the GitHub step summary and does not call Slack.
+#   - With a bot token and channel ID, it posts through chat.postMessage.
+#
+# This keeps notification rollout independent from deployment rollout and lets
+# delivery-e2e-lab exercise every message shape before a real channel is wired.
+# A Slack failure never turns a successful deployment into a failed deployment.
+# =============================================================================
+name: Notify Deployment
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        type: string
+        default: ""
+        description: "Human-friendly app/repository name. Defaults to the repository name."
+      service:
+        required: true
+        type: string
+        description: "Deployed service (for example dogfy-admin)."
+      environment:
+        required: true
+        type: string
+        description: "stg/staging, pro/production, or another explicit environment."
+      operation:
+        required: true
+        type: string
+        description: "deploy, promote, rollback, or preflight."
+      status:
+        required: true
+        type: string
+        description: "success, failure, blocked, or cancelled."
+      commit:
+        type: string
+        default: ""
+        description: "Commit associated with the artefact. Defaults to github.sha."
+      git_tree:
+        type: string
+        default: ""
+        description: "Optional verified Git tree SHA."
+      provenance_status:
+        type: string
+        default: "unknown"
+        description: "verified, failed, not_applicable, or unknown."
+      image_digest:
+        type: string
+        default: ""
+        description: "Immutable deployed image digest."
+      service_url:
+        type: string
+        default: ""
+        description: "Environment/service URL shown as an Open service button."
+      pr_number:
+        type: string
+        default: ""
+      pr_url:
+        type: string
+        default: ""
+      jira_key:
+        type: string
+        default: ""
+      jira_url:
+        type: string
+        default: ""
+      run_url:
+        type: string
+        default: ""
+        description: "Defaults to the current GitHub Actions run."
+      runbook_url:
+        type: string
+        default: ""
+      smoke_test_status:
+        type: string
+        default: "unknown"
+        description: "passed, failed, skipped, or unknown."
+      traffic_changed:
+        type: boolean
+        default: false
+        description: "Whether the workflow changed environment traffic."
+      reason:
+        type: string
+        default: ""
+        description: "Short failure/block reason; never pass logs or secrets."
+      actor:
+        type: string
+        default: ""
+        description: "Defaults to github.actor."
+      channel_id:
+        type: string
+        default: ""
+        description: "Slack channel ID. Defaults to vars.SLACK_RELEASES_CHANNEL_ID."
+      dry_run:
+        type: boolean
+        default: false
+        description: "Render the message without posting it."
+    secrets:
+      slack_bot_token:
+        required: false
+        description: "Slack bot token with chat:write."
+    outputs:
+      posted:
+        description: "true when Slack accepted the message."
+        value: ${{ jobs.notify.outputs.posted }}
+      message_ts:
+        description: "Slack message timestamp when posted."
+        value: ${{ jobs.notify.outputs.message_ts }}
+
+jobs:
+  notify:
+    name: "Notify ${{ inputs.service }} on ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
+      SLACK_CHANNEL_ID: ${{ inputs.channel_id || vars.SLACK_RELEASES_CHANNEL_ID }}
+    outputs:
+      posted: ${{ steps.publish.outputs.posted || 'false' }}
+      message_ts: ${{ steps.publish.outputs.message_ts || '' }}
+
+    steps:
+      - name: Render Slack Block Kit payload
+        id: render
+        shell: bash
+        env:
+          INPUT_APPLICATION: ${{ inputs.application }}
+          INPUT_SERVICE: ${{ inputs.service }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+          INPUT_STATUS: ${{ inputs.status }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_GIT_TREE: ${{ inputs.git_tree }}
+          INPUT_PROVENANCE_STATUS: ${{ inputs.provenance_status }}
+          INPUT_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          INPUT_SERVICE_URL: ${{ inputs.service_url }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_PR_URL: ${{ inputs.pr_url }}
+          INPUT_JIRA_KEY: ${{ inputs.jira_key }}
+          INPUT_JIRA_URL: ${{ inputs.jira_url }}
+          INPUT_RUN_URL: ${{ inputs.run_url }}
+          INPUT_RUNBOOK_URL: ${{ inputs.runbook_url }}
+          INPUT_SMOKE_TEST_STATUS: ${{ inputs.smoke_test_status }}
+          INPUT_TRAFFIC_CHANGED: ${{ inputs.traffic_changed }}
+          INPUT_REASON: ${{ inputs.reason }}
+          INPUT_ACTOR: ${{ inputs.actor }}
+          INPUT_CHANNEL_ID: ${{ inputs.channel_id || vars.SLACK_RELEASES_CHANNEL_ID }}
+        run: |
+          set -euo pipefail
+
+          APP="${INPUT_APPLICATION:-${GITHUB_REPOSITORY#*/}}"
+          COMMIT="${INPUT_COMMIT:-$GITHUB_SHA}"
+          COMMIT_SHORT="${COMMIT:0:7}"
+          ACTOR="${INPUT_ACTOR:-$GITHUB_ACTOR}"
+          RUN_URL="${INPUT_RUN_URL:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}"
+          PR_URL="$INPUT_PR_URL"
+          JIRA_URL="$INPUT_JIRA_URL"
+
+          if [ -z "$PR_URL" ] && [ -n "$INPUT_PR_NUMBER" ]; then
+            PR_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${INPUT_PR_NUMBER}"
+          fi
+          if [ -z "$JIRA_URL" ] && [ -n "$INPUT_JIRA_KEY" ]; then
+            JIRA_URL="https://dogfydiet.atlassian.net/browse/${INPUT_JIRA_KEY}"
+          fi
+
+          ENV_LOWER=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:upper:]' '[:lower:]')
+          OP_LOWER=$(printf '%s' "$INPUT_OPERATION" | tr '[:upper:]' '[:lower:]')
+          STATUS_LOWER=$(printf '%s' "$INPUT_STATUS" | tr '[:upper:]' '[:lower:]')
+          PROVENANCE_LOWER=$(printf '%s' "$INPUT_PROVENANCE_STATUS" | tr '[:upper:]' '[:lower:]')
+          SMOKE_LOWER=$(printf '%s' "$INPUT_SMOKE_TEST_STATUS" | tr '[:upper:]' '[:lower:]')
+
+          case "$ENV_LOWER" in
+            stg|staging|*-stg) ENV_ICON="🟡"; ENV_LABEL="STAGING" ;;
+            pro|prod|production|*-pro) ENV_ICON="🔴"; ENV_LABEL="PRODUCTION" ;;
+            *) ENV_ICON="🔵"; ENV_LABEL=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:lower:]' '[:upper:]') ;;
+          esac
+
+          case "$STATUS_LOWER" in
+            success)
+              STATUS_ICON="✅"
+              case "$OP_LOWER" in
+                promote) STATUS_LABEL="Promoted" ;;
+                rollback) STATUS_LABEL="Completed"; ENV_ICON="↩️" ;;
+                *) STATUS_LABEL="Ready" ;;
+              esac
+              ;;
+            blocked) STATUS_ICON="🛑"; STATUS_LABEL="Blocked" ;;
+            cancelled) STATUS_ICON="⚪"; STATUS_LABEL="Cancelled" ;;
+            *) STATUS_ICON="❌"; STATUS_LABEL="Failed" ;;
+          esac
+
+          case "$PROVENANCE_LOWER" in
+            verified) PROVENANCE_LABEL="Verified ✅" ;;
+            failed) PROVENANCE_LABEL="Failed ❌" ;;
+            not_applicable|skipped) PROVENANCE_LABEL="Not applicable" ;;
+            *) PROVENANCE_LABEL="Unknown" ;;
+          esac
+
+          case "$SMOKE_LOWER" in
+            passed|success) SMOKE_LABEL="Passed ✅" ;;
+            failed|failure) SMOKE_LABEL="Failed ❌" ;;
+            skipped|not_applicable) SMOKE_LABEL="Skipped" ;;
+            *) SMOKE_LABEL="Unknown" ;;
+          esac
+
+          if [ "$INPUT_TRAFFIC_CHANGED" = "true" ]; then
+            TRAFFIC_LABEL="Changed"
+          elif [ "$STATUS_LOWER" = "blocked" ] || [ "$STATUS_LOWER" = "failure" ]; then
+            TRAFFIC_LABEL="Unchanged ✅"
+          else
+            TRAFFIC_LABEL="Unchanged"
+          fi
+
+          DIGEST_DISPLAY="$INPUT_IMAGE_DIGEST"
+          if [ ${#DIGEST_DISPLAY} -gt 24 ]; then
+            DIGEST_DISPLAY="${DIGEST_DISPLAY:0:19}…"
+          fi
+          TREE_DISPLAY="$INPUT_GIT_TREE"
+          if [ ${#TREE_DISPLAY} -gt 12 ]; then
+            TREE_DISPLAY="${TREE_DISPLAY:0:12}…"
+          fi
+
+          TITLE="${ENV_ICON} ${ENV_LABEL} · ${APP} / ${INPUT_SERVICE} · ${STATUS_ICON} ${STATUS_LABEL}"
+          FALLBACK="${TITLE} — commit ${COMMIT_SHORT}; traffic ${TRAFFIC_LABEL}"
+
+          PAYLOAD=$(jq -n \
+            --arg channel "$INPUT_CHANNEL_ID" \
+            --arg title "$TITLE" \
+            --arg fallback "$FALLBACK" \
+            --arg operation "$INPUT_OPERATION" \
+            --arg commit "$COMMIT_SHORT" \
+            --arg commit_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${COMMIT}" \
+            --arg tree "$TREE_DISPLAY" \
+            --arg provenance "$PROVENANCE_LABEL" \
+            --arg digest "$DIGEST_DISPLAY" \
+            --arg smoke "$SMOKE_LABEL" \
+            --arg traffic "$TRAFFIC_LABEL" \
+            --arg actor "$ACTOR" \
+            --arg reason "$INPUT_REASON" \
+            --arg service_url "$INPUT_SERVICE_URL" \
+            --arg pr_number "$INPUT_PR_NUMBER" \
+            --arg pr_url "$PR_URL" \
+            --arg jira_key "$INPUT_JIRA_KEY" \
+            --arg jira_url "$JIRA_URL" \
+            --arg run_url "$RUN_URL" \
+            --arg runbook_url "$INPUT_RUNBOOK_URL" '
+              {
+                channel: $channel,
+                text: $fallback,
+                unfurl_links: false,
+                unfurl_media: false,
+                blocks: ([
+                  {
+                    type: "section",
+                    text: {type: "mrkdwn", text: ("*" + $title + "*")}
+                  },
+                  {
+                    type: "section",
+                    fields: ([
+                      {type: "mrkdwn", text: ("*Operation:*\n`" + $operation + "`")},
+                      {type: "mrkdwn", text: ("*Commit:*\n<" + $commit_url + "|`" + $commit + "`>")},
+                      (if $digest != "" then {type: "mrkdwn", text: ("*Image:*\n`" + $digest + "`")} else empty end),
+                      (if $tree != "" then {type: "mrkdwn", text: ("*Git tree:*\n`" + $tree + "`")} else empty end),
+                      {type: "mrkdwn", text: ("*Provenance:*\n" + $provenance)},
+                      {type: "mrkdwn", text: ("*Smoke test:*\n" + $smoke)},
+                      {type: "mrkdwn", text: ("*Traffic:*\n" + $traffic)},
+                      {type: "mrkdwn", text: ("*Actor:*\n" + $actor)}
+                    ])
+                  },
+                  (if $reason != "" then {
+                    type: "section",
+                    text: {type: "mrkdwn", text: ("*Reason:* " + $reason)}
+                  } else empty end),
+                  {
+                    type: "actions",
+                    elements: ([
+                      (if $service_url != "" then {type: "button", text: {type: "plain_text", text: "Open service"}, url: $service_url} else empty end),
+                      (if $pr_url != "" then {type: "button", text: {type: "plain_text", text: (if $pr_number != "" then ("PR #" + $pr_number) else "Pull request" end)}, url: $pr_url} else empty end),
+                      (if $jira_url != "" then {type: "button", text: {type: "plain_text", text: (if $jira_key != "" then $jira_key else "Jira" end)}, url: $jira_url} else empty end),
+                      {type: "button", text: {type: "plain_text", text: "GitHub run"}, url: $run_url},
+                      (if $runbook_url != "" then {type: "button", text: {type: "plain_text", text: "Runbook"}, url: $runbook_url} else empty end)
+                    ])
+                  }
+                ] | map(select(.type != "actions" or (.elements | length) > 0)))
+              }
+            ')
+
+          {
+            echo 'payload<<SLACK_PAYLOAD'
+            echo "$PAYLOAD"
+            echo 'SLACK_PAYLOAD'
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## ${TITLE}"
+            echo
+            echo '```json'
+            echo "$PAYLOAD"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish to Slack
+        id: publish
+        if: ${{ !inputs.dry_run && env.SLACK_BOT_TOKEN != '' && env.SLACK_CHANNEL_ID != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          PAYLOAD: ${{ steps.render.outputs.payload }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            --header 'Content-Type: application/json; charset=utf-8' \
+            --data "$PAYLOAD" \
+            https://slack.com/api/chat.postMessage)
+
+          if [ "$(jq -r '.ok // false' <<< "$RESPONSE")" = "true" ]; then
+            echo "posted=true" >> "$GITHUB_OUTPUT"
+            echo "message_ts=$(jq -r '.ts // ""' <<< "$RESPONSE")" >> "$GITHUB_OUTPUT"
+            echo "Slack accepted the deployment notification."
+          else
+            ERROR=$(jq -r '.error // "unknown_error"' <<< "$RESPONSE")
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+            echo "message_ts=" >> "$GITHUB_OUTPUT"
+            echo "::warning::Slack notification failed (${ERROR}); deployment result is unchanged."
+          fi
+
+      - name: Explain dry-run or missing configuration
+        if: ${{ inputs.dry_run || env.SLACK_BOT_TOKEN == '' || env.SLACK_CHANNEL_ID == '' }}
+        shell: bash
+        run: |
+          echo "Notification rendered only; Slack was not contacted."
