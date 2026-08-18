@@ -187,7 +187,7 @@ jobs:
 
       # Authenticate after dependency installation but before optional
       # runner-side inputs need to read explicitly mapped build secrets.
-      - uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@v3
         id: gcp-auth
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
