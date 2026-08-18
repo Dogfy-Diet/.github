@@ -107,10 +107,12 @@ The workflow is safe to install before Slack is configured:
 PR and Jira correlation is automatic. Explicit `pr_*` and `jira_*` inputs take
 precedence, but callers normally omit them. On a pull-request event the workflow
 uses the event number/URL and extracts the first Jira key from the head branch,
-title, then body. On a push it asks GitHub for the PR associated with the commit
-and falls back to the commit message and ref name. If no key can be established,
+title, then body. For a `workflow_run` produced by a pull request, it resolves
+the exact PR from the source head branch and commit. On a push it asks GitHub
+for the PR associated with the commit and falls back to the commit message and
+ref name. Manual workflow runs do not guess a PR. If no key can be established,
 the Jira button is omitted rather than guessed. Callers should grant
-`pull-requests: read` so post-merge correlation can query the associated PR.
+`pull-requests: read` so correlation can query the associated PR.
 
 Call it as a separate job after the deploy job so `if: always()` can report
 both success and failure:
