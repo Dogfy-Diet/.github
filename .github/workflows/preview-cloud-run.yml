@@ -117,7 +117,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Fetch private submodules separately so the main checkout keeps using
       # GITHUB_TOKEN and the PAT only authorizes the submodule fetch.

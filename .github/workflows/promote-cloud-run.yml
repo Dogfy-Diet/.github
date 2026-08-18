@@ -123,7 +123,7 @@ jobs:
       # depend on GitHub's REST commit index. This matters when main is not the
       # default branch: a fresh direct/bypassed main commit can be fetchable by
       # Git while the Git objects REST endpoint still returns 404.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ================================================================
       # AUTH

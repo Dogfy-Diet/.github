@@ -87,7 +87,7 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
         env:
@@ -159,7 +159,7 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
         env:
@@ -231,7 +231,7 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
         env:
@@ -303,7 +303,7 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
         env:
@@ -375,7 +375,7 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
         env:
