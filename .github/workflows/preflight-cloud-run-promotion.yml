@@ -1,0 +1,286 @@
+name: Verify Cloud Run Promotion Readiness
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        default: stg
+        description: GitHub environment that can read the staging Artifact Registry.
+      services:
+        required: true
+        type: string
+        description: JSON array of services and repository path prefixes that affect them.
+      sa_email:
+        type: string
+        default: ""
+        description: Read-only/deployer service account used to inspect Artifact Registry.
+
+jobs:
+  preflight:
+    name: Production promotion ready
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve affected services and expected tree
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICES_JSON: ${{ inputs.services }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "::error::Promotion preflight must run from a pull_request event"
+            exit 1
+          fi
+
+          if ! jq -e '
+            type == "array"
+            and length > 0
+            and all(.[]; (.service | type == "string" and length > 0)
+              and (.paths | type == "array" and length > 0)
+              and all(.paths[]; type == "string" and length > 0))
+          ' <<< "$SERVICES_JSON" >/dev/null; then
+            echo "::error::services must be a non-empty JSON array of {service, paths[]} objects"
+            exit 1
+          fi
+
+          FILES_JSON=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename' | jq -Rsc 'split("\n") | map(select(length > 0))')
+
+          AFFECTED=$(jq -cn \
+            --argjson services "$SERVICES_JSON" \
+            --argjson files "$FILES_JSON" '
+              [
+                $services[]
+                | . as $service
+                | select([
+                    $files[] as $file
+                    | $service.paths[] as $path
+                    | select(($file == $path) or ($file | startswith($path)))
+                  ] | length > 0)
+              ]
+            ')
+
+          COUNT=$(jq 'length' <<< "$AFFECTED")
+          EXPECTED_TREE=$(git rev-parse 'HEAD^{tree}')
+
+          if [[ "$HEAD_REF" =~ ^release-sprint- ]]; then
+            MODE=release
+            if ! git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"; then
+              echo "::error::${HEAD_REF} does not contain current main (${BASE_SHA:0:12}). Merge main into release, resolve conflicts, and let staging finish before merging this PR."
+              exit 1
+            fi
+          else
+            MODE=preview
+          fi
+
+          {
+            echo "affected=${AFFECTED}"
+            echo "count=${COUNT}"
+            echo "mode=${MODE}"
+            echo "expected_tree=${EXPECTED_TREE}"
+            echo "head_sha=${HEAD_SHA}"
+            echo "head_ref=${HEAD_REF}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Mode: ${MODE}; affected services: ${COUNT}; expected tree: ${EXPECTED_TREE}"
+
+      - uses: google-github-actions/auth@v2
+        if: steps.plan.outputs.count != '0'
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ inputs.sa_email || vars.SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        if: steps.plan.outputs.count != '0'
+
+      - name: Verify staged or preview artifacts
+        if: steps.plan.outputs.count != '0'
+        env:
+          AFFECTED_JSON: ${{ steps.plan.outputs.affected }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          EXPECTED_TREE: ${{ steps.plan.outputs.expected_tree }}
+          HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          AR_REPO: ${{ vars.AR_REPO }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$AR_REPO" ]; then
+            echo "::error::AR_REPO is not configured in environment ${{ inputs.environment }}"
+            exit 1
+          fi
+
+          REGISTRY_HOST="${AR_REPO%%/*}"
+          gcloud auth configure-docker "$REGISTRY_HOST" --quiet
+
+          read_consistent_label() {
+            local image_json="$1"
+            local label="$2"
+            jq -er --arg label "$label" '
+              (if has("config") then [.]
+               else [.[] | select(type == "object" and has("config"))]
+               end) as $images
+              | [$images[].config.Labels[$label] // ""] as $values
+              | if ($values | length) == 0
+                   or any($values[]; . == "")
+                   or (($values | unique | length) != 1)
+                then error("missing or inconsistent OCI label: " + $label)
+                else $values[0]
+                end
+            ' <<< "$image_json"
+          }
+
+          read_optional_consistent_label() {
+            local image_json="$1"
+            local label="$2"
+            jq -er --arg label "$label" '
+              (if has("config") then [.]
+               else [.[] | select(type == "object" and has("config"))]
+               end) as $images
+              | [$images[].config.Labels[$label] // ""] as $values
+              | if ($values | length) == 0
+                then error("no image configs")
+                elif all($values[]; . == "")
+                then ""
+                elif any($values[]; . == "")
+                     or (($values | unique | length) != 1)
+                then error("inconsistent optional OCI label: " + $label)
+                else $values[0]
+                end
+            ' <<< "$image_json"
+          }
+
+          wait_for_digest() {
+            local image="$1"
+            local tag="$2"
+            local digest=""
+            for attempt in $(seq 1 60); do
+              digest=$(gcloud artifacts docker images describe \
+                "${image}:${tag}" --format='value(image_summary.digest)' 2>/dev/null || true)
+              if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "$digest"
+                return 0
+              fi
+              if [ "$attempt" -eq 1 ]; then
+                echo "Waiting for ${image}:${tag} to be published..." >&2
+              fi
+              sleep 10
+            done
+            return 1
+          }
+
+          while IFS= read -r service; do
+            AR_IMAGE="${AR_REPO}/${service}"
+            if [ "$MODE" = release ]; then
+              SRC_TAG="sha-${HEAD_SHA:0:7}"
+            else
+              SRC_TAG="pr-${PR_NUMBER}-${HEAD_SHA:0:7}"
+            fi
+
+            if ! SRC_DIGEST=$(wait_for_digest "$AR_IMAGE" "$SRC_TAG"); then
+              echo "::error::${service}: ${SRC_TAG} was not published within 10 minutes. Check the staging/preview build for this exact PR head."
+              exit 1
+            fi
+
+            if [ "$MODE" = release ]; then
+              STAGED=false
+              for attempt in $(seq 1 60); do
+                STG_DIGEST=$(gcloud artifacts docker images describe \
+                  "${AR_IMAGE}:stg-latest" --format='value(image_summary.digest)' 2>/dev/null || true)
+                if [ "$STG_DIGEST" = "$SRC_DIGEST" ]; then
+                  STAGED=true
+                  break
+                fi
+                if [ "$attempt" -eq 1 ]; then
+                  echo "Waiting for ${service} staging smoke test to move stg-latest to ${SRC_TAG}..."
+                fi
+                sleep 10
+              done
+              if [ "$STAGED" != true ]; then
+                echo "::error::${service}: ${SRC_TAG} exists, but it is not the staging-approved digest. Wait for a green staging deploy of the release HEAD."
+                exit 1
+              fi
+            fi
+
+            IMAGE_JSON=$(docker buildx imagetools inspect \
+              "${AR_IMAGE}@${SRC_DIGEST}" --format '{{json .Image}}')
+
+            if ! IMAGE_REVISION=$(read_consistent_label "$IMAGE_JSON" 'org.opencontainers.image.revision'); then
+              echo "::error::${service}: missing or inconsistent image revision"
+              exit 1
+            fi
+            if ! [[ "$IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::${service}: image revision is not a full Git SHA: ${IMAGE_REVISION}"
+              exit 1
+            fi
+
+            if ! IMAGE_SOURCE=$(read_consistent_label "$IMAGE_JSON" 'org.opencontainers.image.source'); then
+              echo "::error::${service}: missing or inconsistent image source"
+              exit 1
+            fi
+            if [ "$IMAGE_SOURCE" != "https://github.com/${{ github.repository }}" ]; then
+              echo "::error::${service}: image source ${IMAGE_SOURCE} does not match https://github.com/${{ github.repository }}"
+              exit 1
+            fi
+
+            if ! IMAGE_TREE=$(read_optional_consistent_label "$IMAGE_JSON" 'io.dogfy.git.tree'); then
+              echo "::error::${service}: inconsistent image tree label"
+              exit 1
+            fi
+            if [ -z "$IMAGE_TREE" ]; then
+              git fetch --no-tags origin "$IMAGE_REVISION" >/dev/null 2>&1 || true
+              IMAGE_TREE=$(git rev-parse "${IMAGE_REVISION}^{tree}" 2>/dev/null || true)
+            fi
+
+            if ! [[ "$IMAGE_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::${service}: cannot resolve the image Git tree"
+              exit 1
+            fi
+            if [ "$IMAGE_TREE" != "$EXPECTED_TREE" ]; then
+              echo "::error::${service}: artifact tree ${IMAGE_TREE:0:12} does not match proposed main tree ${EXPECTED_TREE:0:12}. Production would be blocked after merge."
+              exit 1
+            fi
+
+            echo "${service}: ${SRC_TAG}@${SRC_DIGEST:0:19}... tree ${IMAGE_TREE:0:12} is ready"
+            {
+              echo "- \`${service}\`: \`${SRC_TAG}\` / \`${SRC_DIGEST}\` / tree \`${IMAGE_TREE}\`"
+            } >> "$RUNNER_TEMP/promotion-ready.md"
+          done < <(jq -r '.[].service' <<< "$AFFECTED_JSON")
+
+      - name: Summary
+        if: always()
+        env:
+          COUNT: ${{ steps.plan.outputs.count }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          EXPECTED_TREE: ${{ steps.plan.outputs.expected_tree }}
+        run: |
+          {
+            echo "### Production promotion preflight"
+            echo
+            echo "- Mode: \`${MODE:-unknown}\`"
+            echo "- Affected services: \`${COUNT:-0}\`"
+            echo "- Proposed main tree: \`${EXPECTED_TREE:-unresolved}\`"
+            if [ -f "$RUNNER_TEMP/promotion-ready.md" ]; then
+              cat "$RUNNER_TEMP/promotion-ready.md"
+            else
+              echo "- No deployable service paths changed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
