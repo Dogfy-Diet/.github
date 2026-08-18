@@ -171,6 +171,9 @@ jobs:
           EVENT_PR_TITLE: ${{ github.event.pull_request.title }}
           EVENT_PR_BODY: ${{ github.event.pull_request.body }}
           EVENT_HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          EVENT_WORKFLOW_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          EVENT_WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_WORKFLOW_RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -185,16 +188,30 @@ jobs:
           JIRA_KEY="$INPUT_JIRA_KEY"
           JIRA_URL="$INPUT_JIRA_URL"
           JIRA_SOURCE="none"
+          WORKFLOW_RUN_PR_NUMBER=""
+          WORKFLOW_RUN_PR_HEAD_REF=""
+          WORKFLOW_RUN_PR_TITLE=""
+          WORKFLOW_RUN_PR_BODY=""
           ASSOCIATED_PR_HEAD_REF=""
           ASSOCIATED_PR_TITLE=""
           ASSOCIATED_PR_BODY=""
 
           extract_jira_key() {
-            printf '%s' "$1" \
-              | tr '[:lower:]' '[:upper:]' \
-              | grep -Eo '[A-Z][A-Z0-9]+-[0-9]+' \
-              | head -n 1 \
-              || true
+            while IFS= read -r CANDIDATE; do
+              PROJECT_KEY="${CANDIDATE%%-*}"
+              # Branch/release metadata can look like a Jira key. Never turn
+              # those structural tokens into misleading issue links.
+              case "$PROJECT_KEY" in
+                SPRINT|RELEASE|SHA|PR) continue ;;
+              esac
+              printf '%s\n' "$CANDIDATE"
+              break
+            done < <(
+              printf '%s' "$1" \
+                | tr '[:lower:]' '[:upper:]' \
+                | grep -Eo '[A-Z][A-Z0-9]+-[0-9]+' \
+                || true
+            )
           }
 
           if [ -n "$JIRA_KEY" ]; then
@@ -209,11 +226,55 @@ jobs:
             fi
           fi
 
+          # workflow_run events do not reliably populate workflow_run.pull_requests.
+          # For a source pull_request run, resolve the exact PR from its head branch
+          # and commit before considering any other PR associated with the SHA.
+          if [ -z "$EVENT_PR_NUMBER" ] \
+            && [ "$GITHUB_EVENT_NAME" = workflow_run ] \
+            && [ "$EVENT_WORKFLOW_RUN_EVENT" = pull_request ] \
+            && [ -n "$EVENT_WORKFLOW_RUN_HEAD_BRANCH" ] \
+            && { [ -z "$PR_NUMBER" ] || [ -z "$JIRA_KEY" ]; }; then
+            WORKFLOW_RUN_HEAD_OWNER="${EVENT_WORKFLOW_RUN_HEAD_REPOSITORY%%/*}"
+            WORKFLOW_RUN_HEAD_OWNER="${WORKFLOW_RUN_HEAD_OWNER:-$GITHUB_REPOSITORY_OWNER}"
+            WORKFLOW_RUN_PRS=$(gh api --method GET \
+              "/repos/${GITHUB_REPOSITORY}/pulls" \
+              -f state=all \
+              -f head="${WORKFLOW_RUN_HEAD_OWNER}:${EVENT_WORKFLOW_RUN_HEAD_BRANCH}" \
+              -f per_page=100 \
+              2>/dev/null || printf '[]')
+            WORKFLOW_RUN_PR=$(jq -c --arg commit "$COMMIT" '
+              (map(select(.head.sha == $commit)) | sort_by(.updated_at // "") | reverse | .[0])
+              // (sort_by(.updated_at // "") | reverse | .[0])
+              // empty
+            ' <<< "$WORKFLOW_RUN_PRS")
+
+            if [ -n "$WORKFLOW_RUN_PR" ]; then
+              WORKFLOW_RUN_PR_NUMBER=$(jq -r '.number // empty' <<< "$WORKFLOW_RUN_PR")
+              if [ -z "$PR_NUMBER" ]; then
+                PR_NUMBER="$WORKFLOW_RUN_PR_NUMBER"
+              fi
+              if [ -z "$PR_URL" ]; then
+                PR_URL=$(jq -r '.html_url // empty' <<< "$WORKFLOW_RUN_PR")
+              fi
+              WORKFLOW_RUN_PR_HEAD_REF=$(jq -r '.head.ref // empty' <<< "$WORKFLOW_RUN_PR")
+              WORKFLOW_RUN_PR_TITLE=$(jq -r '.title // empty' <<< "$WORKFLOW_RUN_PR")
+              WORKFLOW_RUN_PR_BODY=$(jq -r '.body // empty' <<< "$WORKFLOW_RUN_PR")
+            fi
+          fi
+
           # A push deployment has no pull_request object. Ask GitHub for the PR
           # associated with the artefact commit so squash and merge commits both
-          # retain their PR/Jira correlation. If permissions are restricted, the
-          # event and commit-message fallbacks below still keep notifications safe.
-          if [ -z "$EVENT_PR_NUMBER" ] && { [ -z "$PR_NUMBER" ] || [ -z "$JIRA_KEY" ]; }; then
+          # retain their PR/Jira correlation. For workflow_run, only do this for
+          # a source push: a pull_request source was resolved by head branch above,
+          # while a manual dispatch has no reliable PR to infer.
+          ALLOW_COMMIT_PR_LOOKUP=true
+          if [ "$GITHUB_EVENT_NAME" = workflow_run ] && [ "$EVENT_WORKFLOW_RUN_EVENT" != push ]; then
+            ALLOW_COMMIT_PR_LOOKUP=false
+          fi
+          if [ "$ALLOW_COMMIT_PR_LOOKUP" = true ] \
+            && [ -z "$EVENT_PR_NUMBER" ] \
+            && [ -z "$WORKFLOW_RUN_PR_NUMBER" ] \
+            && { [ -z "$PR_NUMBER" ] || [ -z "$JIRA_KEY" ]; }; then
             ASSOCIATED_PR=$(gh api \
               -H 'Accept: application/vnd.github+json' \
               "/repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/pulls" \
@@ -238,6 +299,9 @@ jobs:
               "pull_request.head.ref"
               "pull_request.title"
               "pull_request.body"
+              "workflow_run.pull_request.head.ref"
+              "workflow_run.pull_request.title"
+              "workflow_run.pull_request.body"
               "associated_pull_request.head.ref"
               "associated_pull_request.title"
               "associated_pull_request.body"
@@ -248,6 +312,9 @@ jobs:
               "$EVENT_PR_HEAD_REF"
               "$EVENT_PR_TITLE"
               "$EVENT_PR_BODY"
+              "$WORKFLOW_RUN_PR_HEAD_REF"
+              "$WORKFLOW_RUN_PR_TITLE"
+              "$WORKFLOW_RUN_PR_BODY"
               "$ASSOCIATED_PR_HEAD_REF"
               "$ASSOCIATED_PR_TITLE"
               "$ASSOCIATED_PR_BODY"
