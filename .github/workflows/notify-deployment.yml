@@ -112,6 +112,15 @@ on:
       message_ts:
         description: "Slack message timestamp when posted."
         value: ${{ jobs.notify.outputs.message_ts }}
+      jira_key:
+        description: "Explicit or automatically inferred Jira issue key."
+        value: ${{ jobs.notify.outputs.jira_key }}
+      jira_source:
+        description: "GitHub context field used to infer jira_key."
+        value: ${{ jobs.notify.outputs.jira_source }}
+      pr_number:
+        description: "Explicit, event-derived, or commit-associated pull request number."
+        value: ${{ jobs.notify.outputs.pr_number }}
 
 jobs:
   notify:
@@ -119,12 +128,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     env:
       SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
       SLACK_CHANNEL_ID: ${{ inputs.channel_id || vars.SLACK_RELEASES_CHANNEL_ID }}
     outputs:
       posted: ${{ steps.publish.outputs.posted || 'false' }}
       message_ts: ${{ steps.publish.outputs.message_ts || '' }}
+      jira_key: ${{ steps.render.outputs.jira_key || '' }}
+      jira_source: ${{ steps.render.outputs.jira_source || 'none' }}
+      pr_number: ${{ steps.render.outputs.pr_number || '' }}
 
     steps:
       - name: Render Slack Block Kit payload
@@ -152,6 +165,13 @@ jobs:
           INPUT_REASON: ${{ inputs.reason }}
           INPUT_ACTOR: ${{ inputs.actor }}
           INPUT_CHANNEL_ID: ${{ inputs.channel_id || vars.SLACK_RELEASES_CHANNEL_ID }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_PR_URL: ${{ github.event.pull_request.html_url }}
+          EVENT_PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          EVENT_PR_TITLE: ${{ github.event.pull_request.title }}
+          EVENT_PR_BODY: ${{ github.event.pull_request.body }}
+          EVENT_HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -160,14 +180,96 @@ jobs:
           COMMIT_SHORT="${COMMIT:0:7}"
           ACTOR="${INPUT_ACTOR:-$GITHUB_ACTOR}"
           RUN_URL="${INPUT_RUN_URL:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}"
-          PR_URL="$INPUT_PR_URL"
+          PR_NUMBER="${INPUT_PR_NUMBER:-$EVENT_PR_NUMBER}"
+          PR_URL="${INPUT_PR_URL:-$EVENT_PR_URL}"
+          JIRA_KEY="$INPUT_JIRA_KEY"
           JIRA_URL="$INPUT_JIRA_URL"
+          JIRA_SOURCE="none"
+          ASSOCIATED_PR_HEAD_REF=""
+          ASSOCIATED_PR_TITLE=""
+          ASSOCIATED_PR_BODY=""
 
-          if [ -z "$PR_URL" ] && [ -n "$INPUT_PR_NUMBER" ]; then
-            PR_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${INPUT_PR_NUMBER}"
+          extract_jira_key() {
+            printf '%s' "$1" \
+              | tr '[:lower:]' '[:upper:]' \
+              | grep -Eo '[A-Z][A-Z0-9]+-[0-9]+' \
+              | head -n 1 \
+              || true
+          }
+
+          if [ -n "$JIRA_KEY" ]; then
+            JIRA_KEY=$(extract_jira_key "$JIRA_KEY")
+            if [ -n "$JIRA_KEY" ]; then
+              JIRA_SOURCE="input"
+            fi
+          elif [ -n "$JIRA_URL" ]; then
+            JIRA_KEY=$(extract_jira_key "$JIRA_URL")
+            if [ -n "$JIRA_KEY" ]; then
+              JIRA_SOURCE="jira_url"
+            fi
           fi
-          if [ -z "$JIRA_URL" ] && [ -n "$INPUT_JIRA_KEY" ]; then
-            JIRA_URL="https://dogfydiet.atlassian.net/browse/${INPUT_JIRA_KEY}"
+
+          # A push deployment has no pull_request object. Ask GitHub for the PR
+          # associated with the artefact commit so squash and merge commits both
+          # retain their PR/Jira correlation. If permissions are restricted, the
+          # event and commit-message fallbacks below still keep notifications safe.
+          if [ -z "$EVENT_PR_NUMBER" ] && { [ -z "$PR_NUMBER" ] || [ -z "$JIRA_KEY" ]; }; then
+            ASSOCIATED_PR=$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/pulls" \
+              --jq 'sort_by(.merged_at // .updated_at) | reverse | .[0] // empty' \
+              2>/dev/null || true)
+
+            if [ -n "$ASSOCIATED_PR" ]; then
+              if [ -z "$PR_NUMBER" ]; then
+                PR_NUMBER=$(jq -r '.number // empty' <<< "$ASSOCIATED_PR")
+              fi
+              if [ -z "$PR_URL" ]; then
+                PR_URL=$(jq -r '.html_url // empty' <<< "$ASSOCIATED_PR")
+              fi
+              ASSOCIATED_PR_HEAD_REF=$(jq -r '.head.ref // empty' <<< "$ASSOCIATED_PR")
+              ASSOCIATED_PR_TITLE=$(jq -r '.title // empty' <<< "$ASSOCIATED_PR")
+              ASSOCIATED_PR_BODY=$(jq -r '.body // empty' <<< "$ASSOCIATED_PR")
+            fi
+          fi
+
+          if [ -z "$JIRA_KEY" ]; then
+            SOURCE_NAMES=(
+              "pull_request.head.ref"
+              "pull_request.title"
+              "pull_request.body"
+              "associated_pull_request.head.ref"
+              "associated_pull_request.title"
+              "associated_pull_request.body"
+              "head_commit.message"
+              "ref_name"
+            )
+            SOURCE_VALUES=(
+              "$EVENT_PR_HEAD_REF"
+              "$EVENT_PR_TITLE"
+              "$EVENT_PR_BODY"
+              "$ASSOCIATED_PR_HEAD_REF"
+              "$ASSOCIATED_PR_TITLE"
+              "$ASSOCIATED_PR_BODY"
+              "$EVENT_HEAD_COMMIT_MESSAGE"
+              "$GITHUB_REF_NAME"
+            )
+
+            for INDEX in "${!SOURCE_VALUES[@]}"; do
+              CANDIDATE=$(extract_jira_key "${SOURCE_VALUES[$INDEX]}")
+              if [ -n "$CANDIDATE" ]; then
+                JIRA_KEY="$CANDIDATE"
+                JIRA_SOURCE="${SOURCE_NAMES[$INDEX]}"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$PR_URL" ] && [ -n "$PR_NUMBER" ]; then
+            PR_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}"
+          fi
+          if [ -z "$JIRA_URL" ] && [ -n "$JIRA_KEY" ]; then
+            JIRA_URL="https://dogfydiet.atlassian.net/browse/${JIRA_KEY}"
           fi
 
           ENV_LOWER=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:upper:]' '[:lower:]')
@@ -245,9 +347,9 @@ jobs:
             --arg actor "$ACTOR" \
             --arg reason "$INPUT_REASON" \
             --arg service_url "$INPUT_SERVICE_URL" \
-            --arg pr_number "$INPUT_PR_NUMBER" \
+            --arg pr_number "$PR_NUMBER" \
             --arg pr_url "$PR_URL" \
-            --arg jira_key "$INPUT_JIRA_KEY" \
+            --arg jira_key "$JIRA_KEY" \
             --arg jira_url "$JIRA_URL" \
             --arg run_url "$RUN_URL" \
             --arg runbook_url "$INPUT_RUNBOOK_URL" '
@@ -296,6 +398,9 @@ jobs:
             echo 'payload<<SLACK_PAYLOAD'
             echo "$PAYLOAD"
             echo 'SLACK_PAYLOAD'
+            echo "jira_key=$JIRA_KEY"
+            echo "jira_source=$JIRA_SOURCE"
+            echo "pr_number=$PR_NUMBER"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -304,6 +409,8 @@ jobs:
             echo '```json'
             echo "$PAYLOAD"
             echo '```'
+            echo
+            echo "Correlation: Jira \`${JIRA_KEY:-none}\` from \`${JIRA_SOURCE}\`; PR \`${PR_NUMBER:-none}\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish to Slack
