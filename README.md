@@ -93,16 +93,17 @@ This repo versions **itself** so consumers can pin instead of tracking `@main`:
 
 ### [`notify-deployment.yml`](.github/workflows/notify-deployment.yml)
 
-Renders the standard Block Kit message for `#tech-sw-releases`. It supports
-staging deploys, production promotions, blocked promotions, and rollbacks.
+Renders the standard one-line Block Kit message for the external or internal
+release channel. It supports staging deploys, production promotions, blocked
+promotions, and rollbacks.
 
 The workflow is safe to install before Slack is configured:
 
 - `dry_run: true` renders the complete payload into the GitHub step summary.
 - A missing bot token or channel ID also renders only; Slack is not contacted.
 - A Slack API outage emits a warning but never changes the deployment result.
-- Messages carry commit, Git tree, image digest, provenance, smoke-test state,
-  traffic state, PR/Jira links, and the GitHub run.
+- Messages show the environment, deployed service, local time, PR title, Jira
+  issue, and the GitHub run without expanding operational metadata into a card.
 
 PR and Jira correlation is automatic. Explicit `pr_*` and `jira_*` inputs take
 precedence, but callers normally omit them. On a pull-request event the workflow
@@ -111,8 +112,11 @@ title, then body. For a `workflow_run` produced by a pull request, it resolves
 the exact PR from the source head branch and commit. On a push it asks GitHub
 for the PR associated with the commit and falls back to the commit message and
 ref name. Manual workflow runs do not guess a PR. If no key can be established,
-the Jira button is omitted rather than guessed. Callers should grant
-`pull-requests: read` so correlation can query the associated PR.
+the Jira link is omitted rather than guessed. The PR title is resolved
+automatically. Callers may pass `jira_title` when Jira credentials are
+available; otherwise the linked issue key remains visible next to the linked PR
+title. Callers should grant `pull-requests: read` so correlation can query the
+associated PR.
 
 Call it as a separate job after the deploy job so `if: always()` can report
 both success and failure:
@@ -143,8 +147,10 @@ jobs:
       slack_bot_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
 ```
 
-The channel ID comes from the organization/repository variable
-`SLACK_RELEASES_CHANNEL_ID`, or from the explicit `channel_id` input. The bot
+The channel ID should be passed explicitly from the consumer using
+`SLACK_EXTERNAL_RELEASES_CHANNEL_ID` or `SLACK_INTERNAL_RELEASES_CHANNEL_ID`.
+If the channel-specific variable is missing, the workflow renders the message
+but does not contact Slack; it never falls back to another audience. The bot
 only needs `chat:write` and should be invited to the target channel.
 
 Previews are intentionally excluded from this workflow. Their URL and status
