@@ -121,9 +121,12 @@ on:
       slack_bot_token:
         required: false
         description: "Slack bot token with chat:write."
+      jira_user_email:
+        required: false
+        description: "Account email for an existing Basic Auth Jira token. Leave empty for scoped Bearer auth."
       jira_api_token:
         required: false
-        description: "Scoped read:jira-work token for a read-only Jira service account."
+        description: "Jira API token. Prefer a scoped read:jira-work service-account token."
     outputs:
       posted:
         description: "true when Slack accepted the message."
@@ -198,6 +201,7 @@ jobs:
           EVENT_WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           EVENT_WORKFLOW_RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           GH_TOKEN: ${{ github.token }}
+          JIRA_USER_EMAIL: ${{ secrets.jira_user_email }}
           JIRA_API_TOKEN: ${{ secrets.jira_api_token }}
         run: |
           set -euo pipefail
@@ -372,21 +376,35 @@ jobs:
             JIRA_URL="${JIRA_BASE_URL}/browse/${JIRA_KEY}"
           fi
 
-          # Jira context is enrichment only: credentials are read-only and an
-          # unavailable/misconfigured Jira API must never affect the deployment
-          # result or suppress its Slack notification.
+          # Jira context is enrichment only. The request only reads `summary`,
+          # and an unavailable/misconfigured Jira API must never affect the
+          # deployment result or suppress its Slack notification.
           if [ -z "$JIRA_TITLE" ] && [ -n "$JIRA_KEY" ]; then
-            if [ -n "$JIRA_API_TOKEN" ] && [ -n "$JIRA_CLOUD_ID" ]; then
+            if [ -n "$JIRA_API_TOKEN" ]; then
               JIRA_RESPONSE=""
-              if JIRA_RESPONSE=$(curl --silent --show-error --fail \
-                --connect-timeout 5 \
-                --max-time 10 \
-                --header "Authorization: Bearer ${JIRA_API_TOKEN}" \
-                --header 'Accept: application/json' \
-                --get \
-                --data-urlencode 'fields=summary' \
-                "https://api.atlassian.com/ex/jira/${JIRA_CLOUD_ID}/rest/api/3/issue/${JIRA_KEY}" \
-                2>/dev/null); then
+              if [ -n "$JIRA_USER_EMAIL" ]; then
+                JIRA_RESPONSE=$(curl --silent --show-error --fail \
+                  --connect-timeout 5 \
+                  --max-time 10 \
+                  --user "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+                  --header 'Accept: application/json' \
+                  --get \
+                  --data-urlencode 'fields=summary' \
+                  "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}" \
+                  2>/dev/null) || JIRA_RESPONSE=""
+              elif [ -n "$JIRA_CLOUD_ID" ]; then
+                JIRA_RESPONSE=$(curl --silent --show-error --fail \
+                  --connect-timeout 5 \
+                  --max-time 10 \
+                  --header "Authorization: Bearer ${JIRA_API_TOKEN}" \
+                  --header 'Accept: application/json' \
+                  --get \
+                  --data-urlencode 'fields=summary' \
+                  "https://api.atlassian.com/ex/jira/${JIRA_CLOUD_ID}/rest/api/3/issue/${JIRA_KEY}" \
+                  2>/dev/null) || JIRA_RESPONSE=""
+              fi
+
+              if [ -n "$JIRA_RESPONSE" ]; then
                 if JIRA_TITLE_CANDIDATE=$(jq -r '.fields.summary // empty' <<< "$JIRA_RESPONSE" 2>/dev/null); then
                   JIRA_TITLE="$JIRA_TITLE_CANDIDATE"
                 else

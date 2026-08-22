@@ -115,10 +115,12 @@ ref name. Manual workflow runs do not guess a PR. If no key can be established,
 the Jira link is omitted rather than guessed. The PR title is resolved
 automatically. When a scoped `read:jira-work` service-account token is passed,
 the workflow fetches only Jira's `summary` field and displays it next to the
-issue key. A missing credential, timeout, permission error, or Jira outage is
-fail-open: the linked issue key remains visible and the deploy result is never
-changed. Callers may still override the summary with `jira_title`. Callers
-should grant `pull-requests: read` so correlation can query the associated PR.
+issue key. Existing Jira tokens that require Basic Auth are also supported when
+their matching `jira_user_email` secret is passed. A missing credential,
+timeout, permission error, or Jira outage is fail-open: the linked issue key
+remains visible and the deploy result is never changed. Callers may still
+override the summary with `jira_title`. Callers should grant
+`pull-requests: read` so correlation can query the associated PR.
 
 Call it as a separate job after the deploy job so `if: always()` can report
 both success and failure:
@@ -147,6 +149,7 @@ jobs:
       traffic_changed: ${{ needs.deploy.result == 'success' }}
     secrets:
       slack_bot_token: ${{ secrets.SLACK_RELEASES_BOT_TOKEN }}
+      jira_user_email: ${{ secrets.JIRA_RELEASES_EMAIL }}
       jira_api_token: ${{ secrets.JIRA_RELEASES_API_TOKEN }}
 ```
 
@@ -159,8 +162,9 @@ only needs `chat:write` and should be invited to the target channel.
 `JIRA_RELEASES_API_TOKEN` should belong to a dedicated Atlassian service
 account with Jira access and the minimum `read:jira-work` scope. Store it as an
 organization Actions secret restricted to the release-notifying repositories;
-never use a personal API token. Service-account tokens expire, so their owner
-must rotate the secret before its configured expiry date.
+never use a personal API token. `JIRA_RELEASES_EMAIL` is only required for a
+legacy Basic Auth token and must match its owner exactly. Service-account tokens
+expire, so their owner must rotate the secret before its configured expiry date.
 
 Previews are intentionally excluded from this workflow. Their URL and status
 belong in the pull-request comment; a separate preview feed can be added later
