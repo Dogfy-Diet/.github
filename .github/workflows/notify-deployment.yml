@@ -509,6 +509,44 @@ jobs:
 
           PR_BUTTON_LABEL="PR${PR_NUMBER:+ #${PR_NUMBER}}"
           JIRA_BUTTON_LABEL="${JIRA_KEY:-Jira}"
+          DETAIL_ROWS=$(jq -nc \
+            --arg pr_context "$PR_CONTEXT" \
+            --arg pr_label "$PR_BUTTON_LABEL" \
+            --arg pr_title "$PR_TITLE_DISPLAY" \
+            --arg jira_context "$JIRA_CONTEXT" \
+            --arg jira_label "$JIRA_BUTTON_LABEL" \
+            --arg jira_title "$JIRA_TITLE_DISPLAY" \
+            '
+              [
+                (if $pr_context != "" then {
+                  type: "rich_text_section",
+                  elements: (
+                    [
+                      {type: "text", text: "Change  ", style: {bold: true}},
+                      {type: "text", text: $pr_label, style: {code: true}}
+                    ]
+                    + (if $pr_title != "" then [
+                        {type: "text", text: "  ·  "},
+                        {type: "text", text: $pr_title}
+                      ] else [] end)
+                  )
+                } else empty end),
+                (if $jira_context != "" then {
+                  type: "rich_text_section",
+                  elements: (
+                    [
+                      {type: "text", text: "Ticket  ", style: {bold: true}},
+                      {type: "text", text: $jira_label, style: {code: true}}
+                    ]
+                    + (if $jira_title != "" then [
+                        {type: "text", text: "  ·  "},
+                        {type: "text", text: $jira_title}
+                      ] else [] end)
+                  )
+                } else empty end)
+              ]
+            ')
+
           BUTTONS=$(jq -nc \
             --arg service_url "$INPUT_SERVICE_URL" \
             --arg pr_url "$PR_URL" \
@@ -541,8 +579,8 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg channel "$INPUT_CHANNEL_ID" \
             --arg header "$HEADER" \
-            --arg context "$CONTEXT" \
             --arg fallback "$FALLBACK" \
+            --argjson detail_rows "$DETAIL_ROWS" \
             --argjson buttons "$BUTTONS" \
             '
               {
@@ -555,9 +593,9 @@ jobs:
                     type: "section",
                     text: {type: "mrkdwn", text: $header}
                   }]
-                  + (if $context != "" then [{
-                      type: "section",
-                      text: {type: "plain_text", text: $context, emoji: true}
+                  + (if ($detail_rows | length) > 0 then [{
+                      type: "rich_text",
+                      elements: $detail_rows
                     }] else [] end)
                   + (if ($buttons | length) > 0 then [{
                       type: "actions",

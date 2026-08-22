@@ -102,10 +102,11 @@ The workflow is safe to install before Slack is configured:
 - `dry_run: true` renders the complete payload into the GitHub step summary.
 - A missing bot token or channel ID also renders only; Slack is not contacted.
 - A Slack API outage emits a warning but never changes the deployment result.
-- Messages show the environment, deployed service, local time, PR title, and
-  Jira issue in a compact context section. Navigation is kept out of the text:
-  up to five neutral buttons open the service, PR, Jira issue, GitHub run, and
-  runbook.
+- Messages show the environment, deployed service, and local time in the
+  header. Two native rich-text rows label the change and Jira ticket, render
+  their identifiers as code badges, and keep external titles as literal text.
+  Navigation stays out of the copy: up to five neutral buttons open the
+  service, PR, Jira issue, GitHub run, and runbook.
 
 PR and Jira correlation is automatic. Explicit `pr_*` and `jira_*` inputs take
 precedence, but callers normally omit them. On a pull-request event the workflow
