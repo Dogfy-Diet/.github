@@ -77,7 +77,15 @@ on:
       jira_title:
         type: string
         default: ""
-        description: "Optional Jira summary shown next to the issue key."
+        description: "Optional Jira summary. When empty, the workflow resolves it with read-only Jira credentials."
+      jira_base_url:
+        type: string
+        default: "https://dogfydiet.atlassian.net"
+        description: "Atlassian site used to build issue links and resolve Jira summaries."
+      jira_cloud_id:
+        type: string
+        default: "ecd3d26f-6f08-4f34-a5fa-f82dd18c5e7d"
+        description: "Atlassian cloud ID used by scoped service-account tokens."
       run_url:
         type: string
         default: ""
@@ -113,6 +121,9 @@ on:
       slack_bot_token:
         required: false
         description: "Slack bot token with chat:write."
+      jira_api_token:
+        required: false
+        description: "Scoped read:jira-work token for a read-only Jira service account."
     outputs:
       posted:
         description: "true when Slack accepted the message."
@@ -168,6 +179,8 @@ jobs:
           INPUT_JIRA_KEY: ${{ inputs.jira_key }}
           INPUT_JIRA_URL: ${{ inputs.jira_url }}
           INPUT_JIRA_TITLE: ${{ inputs.jira_title }}
+          INPUT_JIRA_BASE_URL: ${{ inputs.jira_base_url }}
+          INPUT_JIRA_CLOUD_ID: ${{ inputs.jira_cloud_id }}
           INPUT_RUN_URL: ${{ inputs.run_url }}
           INPUT_RUNBOOK_URL: ${{ inputs.runbook_url }}
           INPUT_SMOKE_TEST_STATUS: ${{ inputs.smoke_test_status }}
@@ -185,6 +198,7 @@ jobs:
           EVENT_WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           EVENT_WORKFLOW_RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           GH_TOKEN: ${{ github.token }}
+          JIRA_API_TOKEN: ${{ secrets.jira_api_token }}
         run: |
           set -euo pipefail
 
@@ -197,6 +211,9 @@ jobs:
           JIRA_KEY="$INPUT_JIRA_KEY"
           JIRA_URL="$INPUT_JIRA_URL"
           JIRA_TITLE="$INPUT_JIRA_TITLE"
+          JIRA_BASE_URL="${INPUT_JIRA_BASE_URL%/}"
+          JIRA_BASE_URL="${JIRA_BASE_URL:-https://dogfydiet.atlassian.net}"
+          JIRA_CLOUD_ID="$INPUT_JIRA_CLOUD_ID"
           JIRA_SOURCE="none"
           WORKFLOW_RUN_PR_NUMBER=""
           WORKFLOW_RUN_PR_HEAD_REF=""
@@ -352,7 +369,35 @@ jobs:
             PR_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}"
           fi
           if [ -z "$JIRA_URL" ] && [ -n "$JIRA_KEY" ]; then
-            JIRA_URL="https://dogfydiet.atlassian.net/browse/${JIRA_KEY}"
+            JIRA_URL="${JIRA_BASE_URL}/browse/${JIRA_KEY}"
+          fi
+
+          # Jira context is enrichment only: credentials are read-only and an
+          # unavailable/misconfigured Jira API must never affect the deployment
+          # result or suppress its Slack notification.
+          if [ -z "$JIRA_TITLE" ] && [ -n "$JIRA_KEY" ]; then
+            if [ -n "$JIRA_API_TOKEN" ] && [ -n "$JIRA_CLOUD_ID" ]; then
+              JIRA_RESPONSE=""
+              if JIRA_RESPONSE=$(curl --silent --show-error --fail \
+                --connect-timeout 5 \
+                --max-time 10 \
+                --header "Authorization: Bearer ${JIRA_API_TOKEN}" \
+                --header 'Accept: application/json' \
+                --get \
+                --data-urlencode 'fields=summary' \
+                "https://api.atlassian.com/ex/jira/${JIRA_CLOUD_ID}/rest/api/3/issue/${JIRA_KEY}" \
+                2>/dev/null); then
+                if JIRA_TITLE_CANDIDATE=$(jq -r '.fields.summary // empty' <<< "$JIRA_RESPONSE" 2>/dev/null); then
+                  JIRA_TITLE="$JIRA_TITLE_CANDIDATE"
+                else
+                  echo "::warning::Jira returned an invalid response for ${JIRA_KEY}; using the issue key only."
+                fi
+              else
+                echo "::warning::Could not resolve the Jira title for ${JIRA_KEY}; using the issue key only."
+              fi
+            else
+              echo "::notice::Jira title lookup is not configured; using the issue key only."
+            fi
           fi
 
           ENV_LOWER=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:upper:]' '[:lower:]')
