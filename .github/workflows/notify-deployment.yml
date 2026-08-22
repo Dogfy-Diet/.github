@@ -464,61 +464,105 @@ jobs:
           TIME_FALLBACK=$(date +%H:%M:%S)
           TIME_MARKUP="<!date^${DEPLOYED_AT}^{time_secs}|${TIME_FALLBACK}>"
 
-          compact_link_label() {
+          compact_plain_label() {
             printf '%s' "$1" \
               | tr '\r\n' '  ' \
-              | sed -E 's/[[:space:]]+/ /g; s/[|]/-/g; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' \
+              | sed -E 's/[[:space:]]+/ /g' \
               | cut -c1-110
           }
 
-          PR_TITLE_DISPLAY=$(compact_link_label "$PR_TITLE")
-          JIRA_TITLE_DISPLAY=$(compact_link_label "$JIRA_TITLE")
-          PR_LINK_LABEL=""
-          JIRA_LINK_LABEL=""
-          if [ -n "$PR_URL" ]; then
-            PR_LINK_LABEL="PR${PR_NUMBER:+ #${PR_NUMBER}}"
+          PR_TITLE_DISPLAY=$(compact_plain_label "$PR_TITLE")
+          JIRA_TITLE_DISPLAY=$(compact_plain_label "$JIRA_TITLE")
+          PR_CONTEXT=""
+          JIRA_CONTEXT=""
+          if [ -n "$PR_URL" ] || [ -n "$PR_TITLE_DISPLAY" ]; then
+            PR_CONTEXT="PR${PR_NUMBER:+ #${PR_NUMBER}}"
             if [ -n "$PR_TITLE_DISPLAY" ]; then
-              PR_LINK_LABEL="${PR_LINK_LABEL} — ${PR_TITLE_DISPLAY}"
+              PR_CONTEXT="${PR_CONTEXT} — ${PR_TITLE_DISPLAY}"
             fi
           fi
-          if [ -n "$JIRA_URL" ]; then
-            JIRA_LINK_LABEL="${JIRA_KEY:-Jira}"
+          if [ -n "$JIRA_URL" ] || [ -n "$JIRA_TITLE_DISPLAY" ]; then
+            JIRA_CONTEXT="${JIRA_KEY:-Jira}"
             if [ -n "$JIRA_TITLE_DISPLAY" ]; then
-              JIRA_LINK_LABEL="${JIRA_LINK_LABEL} — ${JIRA_TITLE_DISPLAY}"
+              JIRA_CONTEXT="${JIRA_CONTEXT} — ${JIRA_TITLE_DISPLAY}"
             fi
           fi
 
           TITLE="${STATUS_ICON} *[${ENV_LABEL}] ${ACTION_LABEL} ${SERVICE_LABEL}${STATUS_SUFFIX}*"
-          LINE="${TITLE} · ${TIME_MARKUP}"
-          if [ -n "$PR_LINK_LABEL" ]; then
-            LINE="${LINE} · <${PR_URL}|${PR_LINK_LABEL}>"
+          HEADER="${TITLE} · ${TIME_MARKUP}"
+          CONTEXT=""
+          if [ -n "$PR_CONTEXT" ]; then
+            CONTEXT="$PR_CONTEXT"
           fi
-          if [ -n "$JIRA_LINK_LABEL" ]; then
-            LINE="${LINE} · <${JIRA_URL}|${JIRA_LINK_LABEL}>"
+          if [ -n "$JIRA_CONTEXT" ]; then
+            if [ -n "$CONTEXT" ]; then
+              CONTEXT="${CONTEXT}"$'\n'"${JIRA_CONTEXT}"
+            else
+              CONTEXT="$JIRA_CONTEXT"
+            fi
           fi
-          RUN_LABEL="View run"
+
+          RUN_LABEL="GitHub run"
           if [ "$STATUS_LOWER" = failure ] || [ "$STATUS_LOWER" = blocked ]; then
             RUN_LABEL="View error"
           fi
-          LINE="${LINE} · <${RUN_URL}|${RUN_LABEL}>"
+
+          PR_BUTTON_LABEL="PR${PR_NUMBER:+ #${PR_NUMBER}}"
+          JIRA_BUTTON_LABEL="${JIRA_KEY:-Jira}"
+          BUTTONS=$(jq -nc \
+            --arg service_url "$INPUT_SERVICE_URL" \
+            --arg pr_url "$PR_URL" \
+            --arg pr_label "$PR_BUTTON_LABEL" \
+            --arg jira_url "$JIRA_URL" \
+            --arg jira_label "$JIRA_BUTTON_LABEL" \
+            --arg run_url "$RUN_URL" \
+            --arg run_label "$RUN_LABEL" \
+            --arg runbook_url "$INPUT_RUNBOOK_URL" \
+            '
+              [
+                (if $service_url != "" then
+                  {type: "button", text: {type: "plain_text", text: "Open service", emoji: true}, url: $service_url, action_id: "open_service"}
+                else empty end),
+                (if $pr_url != "" then
+                  {type: "button", text: {type: "plain_text", text: $pr_label, emoji: true}, url: $pr_url, action_id: "open_pull_request"}
+                else empty end),
+                (if $jira_url != "" then
+                  {type: "button", text: {type: "plain_text", text: $jira_label, emoji: true}, url: $jira_url, action_id: "open_jira_issue"}
+                else empty end),
+                {type: "button", text: {type: "plain_text", text: $run_label, emoji: true}, url: $run_url, action_id: "open_github_run"},
+                (if $runbook_url != "" then
+                  {type: "button", text: {type: "plain_text", text: "Runbook", emoji: true}, url: $runbook_url, action_id: "open_runbook"}
+                else empty end)
+              ]
+            ')
+
           FALLBACK="[${ENV_LABEL}] ${ACTION_LABEL} ${SERVICE_LABEL}${STATUS_SUFFIX} - ${TIME_FALLBACK} - ${RUN_URL}"
 
           PAYLOAD=$(jq -n \
             --arg channel "$INPUT_CHANNEL_ID" \
-            --arg line "$LINE" \
+            --arg header "$HEADER" \
+            --arg context "$CONTEXT" \
             --arg fallback "$FALLBACK" \
+            --argjson buttons "$BUTTONS" \
             '
               {
                 channel: $channel,
                 text: $fallback,
                 unfurl_links: false,
                 unfurl_media: false,
-                blocks: [
-                  {
+                blocks:
+                  ([{
                     type: "section",
-                    text: {type: "mrkdwn", text: $line}
-                  }
-                ]
+                    text: {type: "mrkdwn", text: $header}
+                  }]
+                  + (if $context != "" then [{
+                      type: "section",
+                      text: {type: "plain_text", text: $context, emoji: true}
+                    }] else [] end)
+                  + (if ($buttons | length) > 0 then [{
+                      type: "actions",
+                      elements: $buttons
+                    }] else [] end))
               }
             ')
 
@@ -534,7 +578,11 @@ jobs:
           {
             echo "## ${STATUS_ICON} [${ENV_LABEL}] ${ACTION_LABEL} ${SERVICE_LABEL}${STATUS_SUFFIX}"
             echo
-            echo "$LINE"
+            echo "$HEADER"
+            if [ -n "$CONTEXT" ]; then
+              echo
+              echo "$CONTEXT"
+            fi
             echo
             echo '```json'
             echo "$PAYLOAD"

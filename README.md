@@ -93,7 +93,7 @@ This repo versions **itself** so consumers can pin instead of tracking `@main`:
 
 ### [`notify-deployment.yml`](.github/workflows/notify-deployment.yml)
 
-Renders the standard one-line Block Kit message for the external or internal
+Renders the standard compact Block Kit message for the external or internal
 release channel. It supports staging deploys, production promotions, blocked
 promotions, and rollbacks.
 
@@ -102,8 +102,10 @@ The workflow is safe to install before Slack is configured:
 - `dry_run: true` renders the complete payload into the GitHub step summary.
 - A missing bot token or channel ID also renders only; Slack is not contacted.
 - A Slack API outage emits a warning but never changes the deployment result.
-- Messages show the environment, deployed service, local time, PR title, Jira
-  issue, and the GitHub run without expanding operational metadata into a card.
+- Messages show the environment, deployed service, local time, PR title, and
+  Jira issue in a compact context section. Navigation is kept out of the text:
+  up to five neutral buttons open the service, PR, Jira issue, GitHub run, and
+  runbook.
 
 PR and Jira correlation is automatic. Explicit `pr_*` and `jira_*` inputs take
 precedence, but callers normally omit them. On a pull-request event the workflow
