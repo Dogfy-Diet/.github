@@ -64,12 +64,20 @@ on:
       pr_url:
         type: string
         default: ""
+      pr_title:
+        type: string
+        default: ""
+        description: "Optional PR title. Automatically resolved when GitHub correlation finds a PR."
       jira_key:
         type: string
         default: ""
       jira_url:
         type: string
         default: ""
+      jira_title:
+        type: string
+        default: ""
+        description: "Optional Jira summary shown next to the issue key."
       run_url:
         type: string
         default: ""
@@ -96,7 +104,7 @@ on:
       channel_id:
         type: string
         default: ""
-        description: "Slack channel ID. Defaults to vars.SLACK_RELEASES_CHANNEL_ID."
+        description: "Explicit Slack channel ID. Missing configuration renders only and never posts."
       dry_run:
         type: boolean
         default: false
@@ -131,7 +139,7 @@ jobs:
       pull-requests: read
     env:
       SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
-      SLACK_CHANNEL_ID: ${{ inputs.channel_id || vars.SLACK_RELEASES_CHANNEL_ID }}
+      SLACK_CHANNEL_ID: ${{ inputs.channel_id }}
     outputs:
       posted: ${{ steps.publish.outputs.posted || 'false' }}
       message_ts: ${{ steps.publish.outputs.message_ts || '' }}
@@ -156,15 +164,17 @@ jobs:
           INPUT_SERVICE_URL: ${{ inputs.service_url }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_PR_URL: ${{ inputs.pr_url }}
+          INPUT_PR_TITLE: ${{ inputs.pr_title }}
           INPUT_JIRA_KEY: ${{ inputs.jira_key }}
           INPUT_JIRA_URL: ${{ inputs.jira_url }}
+          INPUT_JIRA_TITLE: ${{ inputs.jira_title }}
           INPUT_RUN_URL: ${{ inputs.run_url }}
           INPUT_RUNBOOK_URL: ${{ inputs.runbook_url }}
           INPUT_SMOKE_TEST_STATUS: ${{ inputs.smoke_test_status }}
           INPUT_TRAFFIC_CHANGED: ${{ inputs.traffic_changed }}
           INPUT_REASON: ${{ inputs.reason }}
           INPUT_ACTOR: ${{ inputs.actor }}
-          INPUT_CHANNEL_ID: ${{ inputs.channel_id || vars.SLACK_RELEASES_CHANNEL_ID }}
+          INPUT_CHANNEL_ID: ${{ inputs.channel_id }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           EVENT_PR_URL: ${{ github.event.pull_request.html_url }}
           EVENT_PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -180,13 +190,13 @@ jobs:
 
           APP="${INPUT_APPLICATION:-${GITHUB_REPOSITORY#*/}}"
           COMMIT="${INPUT_COMMIT:-$GITHUB_SHA}"
-          COMMIT_SHORT="${COMMIT:0:7}"
-          ACTOR="${INPUT_ACTOR:-$GITHUB_ACTOR}"
           RUN_URL="${INPUT_RUN_URL:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}"
           PR_NUMBER="${INPUT_PR_NUMBER:-$EVENT_PR_NUMBER}"
           PR_URL="${INPUT_PR_URL:-$EVENT_PR_URL}"
+          PR_TITLE="${INPUT_PR_TITLE:-$EVENT_PR_TITLE}"
           JIRA_KEY="$INPUT_JIRA_KEY"
           JIRA_URL="$INPUT_JIRA_URL"
+          JIRA_TITLE="$INPUT_JIRA_TITLE"
           JIRA_SOURCE="none"
           WORKFLOW_RUN_PR_NUMBER=""
           WORKFLOW_RUN_PR_HEAD_REF=""
@@ -256,6 +266,9 @@ jobs:
               if [ -z "$PR_URL" ]; then
                 PR_URL=$(jq -r '.html_url // empty' <<< "$WORKFLOW_RUN_PR")
               fi
+              if [ -z "$PR_TITLE" ]; then
+                PR_TITLE=$(jq -r '.title // empty' <<< "$WORKFLOW_RUN_PR")
+              fi
               WORKFLOW_RUN_PR_HEAD_REF=$(jq -r '.head.ref // empty' <<< "$WORKFLOW_RUN_PR")
               WORKFLOW_RUN_PR_TITLE=$(jq -r '.title // empty' <<< "$WORKFLOW_RUN_PR")
               WORKFLOW_RUN_PR_BODY=$(jq -r '.body // empty' <<< "$WORKFLOW_RUN_PR")
@@ -287,6 +300,9 @@ jobs:
               fi
               if [ -z "$PR_URL" ]; then
                 PR_URL=$(jq -r '.html_url // empty' <<< "$ASSOCIATED_PR")
+              fi
+              if [ -z "$PR_TITLE" ]; then
+                PR_TITLE=$(jq -r '.title // empty' <<< "$ASSOCIATED_PR")
               fi
               ASSOCIATED_PR_HEAD_REF=$(jq -r '.head.ref // empty' <<< "$ASSOCIATED_PR")
               ASSOCIATED_PR_TITLE=$(jq -r '.title // empty' <<< "$ASSOCIATED_PR")
@@ -342,122 +358,104 @@ jobs:
           ENV_LOWER=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:upper:]' '[:lower:]')
           OP_LOWER=$(printf '%s' "$INPUT_OPERATION" | tr '[:upper:]' '[:lower:]')
           STATUS_LOWER=$(printf '%s' "$INPUT_STATUS" | tr '[:upper:]' '[:lower:]')
-          PROVENANCE_LOWER=$(printf '%s' "$INPUT_PROVENANCE_STATUS" | tr '[:upper:]' '[:lower:]')
-          SMOKE_LOWER=$(printf '%s' "$INPUT_SMOKE_TEST_STATUS" | tr '[:upper:]' '[:lower:]')
 
           case "$ENV_LOWER" in
-            stg|staging|*-stg) ENV_ICON="🟡"; ENV_LABEL="STAGING" ;;
-            pro|prod|production|*-pro) ENV_ICON="🔴"; ENV_LABEL="PRODUCTION" ;;
-            *) ENV_ICON="🔵"; ENV_LABEL=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:lower:]' '[:upper:]') ;;
+            stg|staging|*-stg) ENV_LABEL="STAGING" ;;
+            pro|prod|production|*-pro) ENV_LABEL="PRODUCTION" ;;
+            *) ENV_LABEL=$(printf '%s' "$INPUT_ENVIRONMENT" | tr '[:lower:]' '[:upper:]') ;;
           esac
 
           case "$STATUS_LOWER" in
-            success)
-              STATUS_ICON="✅"
-              case "$OP_LOWER" in
-                promote) STATUS_LABEL="Promoted" ;;
-                rollback) STATUS_LABEL="Completed"; ENV_ICON="↩️" ;;
-                *) STATUS_LABEL="Ready" ;;
-              esac
-              ;;
-            blocked) STATUS_ICON="🛑"; STATUS_LABEL="Blocked" ;;
-            cancelled) STATUS_ICON="⚪"; STATUS_LABEL="Cancelled" ;;
-            *) STATUS_ICON="❌"; STATUS_LABEL="Failed" ;;
+            success) STATUS_ICON="✅"; STATUS_SUFFIX="" ;;
+            blocked) STATUS_ICON="🛑"; STATUS_SUFFIX=" blocked" ;;
+            cancelled) STATUS_ICON="⚪"; STATUS_SUFFIX=" cancelled" ;;
+            *) STATUS_ICON="❌"; STATUS_SUFFIX=" failed" ;;
           esac
 
-          case "$PROVENANCE_LOWER" in
-            verified) PROVENANCE_LABEL="Verified ✅" ;;
-            failed) PROVENANCE_LABEL="Failed ❌" ;;
-            not_applicable|skipped) PROVENANCE_LABEL="Not applicable" ;;
-            *) PROVENANCE_LABEL="Unknown" ;;
+          case "$APP" in
+            website) APP_LABEL="Website" ;;
+            cust-web) APP_LABEL="Cust Web" ;;
+            web-apps) APP_LABEL="Web Apps" ;;
+            internal-apps) APP_LABEL="Internal Apps" ;;
+            *) APP_LABEL="$APP" ;;
           esac
 
-          case "$SMOKE_LOWER" in
-            passed|success) SMOKE_LABEL="Passed ✅" ;;
-            failed|failure) SMOKE_LABEL="Failed ❌" ;;
-            skipped|not_applicable) SMOKE_LABEL="Skipped" ;;
-            *) SMOKE_LABEL="Unknown" ;;
+          case "$INPUT_SERVICE" in
+            dogfy-website) SERVICE_LABEL="Website" ;;
+            dogfy-cust) SERVICE_LABEL="Cust Web" ;;
+            dogfy-admin) SERVICE_LABEL="Admin" ;;
+            dogfy-backoffice) SERVICE_LABEL="Backoffice" ;;
+            dogfy-picking) SERVICE_LABEL="Picking" ;;
+            dogfy-sales) SERVICE_LABEL="Sales" ;;
+            production-release) SERVICE_LABEL="$APP_LABEL" ;;
+            *) SERVICE_LABEL="$INPUT_SERVICE" ;;
           esac
 
-          if [ "$INPUT_TRAFFIC_CHANGED" = "true" ]; then
-            TRAFFIC_LABEL="Changed"
-          elif [ "$STATUS_LOWER" = "blocked" ] || [ "$STATUS_LOWER" = "failure" ]; then
-            TRAFFIC_LABEL="Unchanged ✅"
-          else
-            TRAFFIC_LABEL="Unchanged"
+          case "$OP_LOWER" in
+            rollback) ACTION_LABEL="Rollback" ;;
+            preflight) ACTION_LABEL="Promotion" ;;
+            *) ACTION_LABEL="Deploy" ;;
+          esac
+
+          DEPLOYED_AT=$(date +%s)
+          TIME_FALLBACK=$(date +%H:%M:%S)
+          TIME_MARKUP="<!date^${DEPLOYED_AT}^{time_secs}|${TIME_FALLBACK}>"
+
+          compact_link_label() {
+            printf '%s' "$1" \
+              | tr '\r\n' '  ' \
+              | sed -E 's/[[:space:]]+/ /g; s/[|]/-/g; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' \
+              | cut -c1-110
+          }
+
+          PR_TITLE_DISPLAY=$(compact_link_label "$PR_TITLE")
+          JIRA_TITLE_DISPLAY=$(compact_link_label "$JIRA_TITLE")
+          PR_LINK_LABEL=""
+          JIRA_LINK_LABEL=""
+          if [ -n "$PR_URL" ]; then
+            PR_LINK_LABEL="PR${PR_NUMBER:+ #${PR_NUMBER}}"
+            if [ -n "$PR_TITLE_DISPLAY" ]; then
+              PR_LINK_LABEL="${PR_LINK_LABEL} — ${PR_TITLE_DISPLAY}"
+            fi
+          fi
+          if [ -n "$JIRA_URL" ]; then
+            JIRA_LINK_LABEL="${JIRA_KEY:-Jira}"
+            if [ -n "$JIRA_TITLE_DISPLAY" ]; then
+              JIRA_LINK_LABEL="${JIRA_LINK_LABEL} — ${JIRA_TITLE_DISPLAY}"
+            fi
           fi
 
-          DIGEST_DISPLAY="$INPUT_IMAGE_DIGEST"
-          if [ ${#DIGEST_DISPLAY} -gt 24 ]; then
-            DIGEST_DISPLAY="${DIGEST_DISPLAY:0:19}…"
+          TITLE="${STATUS_ICON} *[${ENV_LABEL}] ${ACTION_LABEL} ${SERVICE_LABEL}${STATUS_SUFFIX}*"
+          LINE="${TITLE} · ${TIME_MARKUP}"
+          if [ -n "$PR_LINK_LABEL" ]; then
+            LINE="${LINE} · <${PR_URL}|${PR_LINK_LABEL}>"
           fi
-          TREE_DISPLAY="$INPUT_GIT_TREE"
-          if [ ${#TREE_DISPLAY} -gt 12 ]; then
-            TREE_DISPLAY="${TREE_DISPLAY:0:12}…"
+          if [ -n "$JIRA_LINK_LABEL" ]; then
+            LINE="${LINE} · <${JIRA_URL}|${JIRA_LINK_LABEL}>"
           fi
-
-          TITLE="${ENV_ICON} ${ENV_LABEL} · ${APP} / ${INPUT_SERVICE} · ${STATUS_ICON} ${STATUS_LABEL}"
-          FALLBACK="${TITLE} — commit ${COMMIT_SHORT}; traffic ${TRAFFIC_LABEL}"
+          RUN_LABEL="View run"
+          if [ "$STATUS_LOWER" = failure ] || [ "$STATUS_LOWER" = blocked ]; then
+            RUN_LABEL="View error"
+          fi
+          LINE="${LINE} · <${RUN_URL}|${RUN_LABEL}>"
+          FALLBACK="[${ENV_LABEL}] ${ACTION_LABEL} ${SERVICE_LABEL}${STATUS_SUFFIX} - ${TIME_FALLBACK} - ${RUN_URL}"
 
           PAYLOAD=$(jq -n \
             --arg channel "$INPUT_CHANNEL_ID" \
-            --arg title "$TITLE" \
+            --arg line "$LINE" \
             --arg fallback "$FALLBACK" \
-            --arg operation "$INPUT_OPERATION" \
-            --arg commit "$COMMIT_SHORT" \
-            --arg commit_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${COMMIT}" \
-            --arg tree "$TREE_DISPLAY" \
-            --arg provenance "$PROVENANCE_LABEL" \
-            --arg digest "$DIGEST_DISPLAY" \
-            --arg smoke "$SMOKE_LABEL" \
-            --arg traffic "$TRAFFIC_LABEL" \
-            --arg actor "$ACTOR" \
-            --arg reason "$INPUT_REASON" \
-            --arg service_url "$INPUT_SERVICE_URL" \
-            --arg pr_number "$PR_NUMBER" \
-            --arg pr_url "$PR_URL" \
-            --arg jira_key "$JIRA_KEY" \
-            --arg jira_url "$JIRA_URL" \
-            --arg run_url "$RUN_URL" \
-            --arg runbook_url "$INPUT_RUNBOOK_URL" '
+            '
               {
                 channel: $channel,
                 text: $fallback,
                 unfurl_links: false,
                 unfurl_media: false,
-                blocks: ([
+                blocks: [
                   {
                     type: "section",
-                    text: {type: "mrkdwn", text: ("*" + $title + "*")}
-                  },
-                  {
-                    type: "section",
-                    fields: ([
-                      {type: "mrkdwn", text: ("*Operation:*\n`" + $operation + "`")},
-                      {type: "mrkdwn", text: ("*Commit:*\n<" + $commit_url + "|`" + $commit + "`>")},
-                      (if $digest != "" then {type: "mrkdwn", text: ("*Image:*\n`" + $digest + "`")} else empty end),
-                      (if $tree != "" then {type: "mrkdwn", text: ("*Git tree:*\n`" + $tree + "`")} else empty end),
-                      {type: "mrkdwn", text: ("*Provenance:*\n" + $provenance)},
-                      {type: "mrkdwn", text: ("*Smoke test:*\n" + $smoke)},
-                      {type: "mrkdwn", text: ("*Traffic:*\n" + $traffic)},
-                      {type: "mrkdwn", text: ("*Actor:*\n" + $actor)}
-                    ])
-                  },
-                  (if $reason != "" then {
-                    type: "section",
-                    text: {type: "mrkdwn", text: ("*Reason:* " + $reason)}
-                  } else empty end),
-                  {
-                    type: "actions",
-                    elements: ([
-                      (if $service_url != "" then {type: "button", text: {type: "plain_text", text: "Open service"}, url: $service_url} else empty end),
-                      (if $pr_url != "" then {type: "button", text: {type: "plain_text", text: (if $pr_number != "" then ("PR #" + $pr_number) else "Pull request" end)}, url: $pr_url} else empty end),
-                      (if $jira_url != "" then {type: "button", text: {type: "plain_text", text: (if $jira_key != "" then $jira_key else "Jira" end)}, url: $jira_url} else empty end),
-                      {type: "button", text: {type: "plain_text", text: "GitHub run"}, url: $run_url},
-                      (if $runbook_url != "" then {type: "button", text: {type: "plain_text", text: "Runbook"}, url: $runbook_url} else empty end)
-                    ])
+                    text: {type: "mrkdwn", text: $line}
                   }
-                ] | map(select(.type != "actions" or (.elements | length) > 0)))
+                ]
               }
             ')
 
@@ -471,7 +469,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo "## ${TITLE}"
+            echo "## ${STATUS_ICON} [${ENV_LABEL}] ${ACTION_LABEL} ${SERVICE_LABEL}${STATUS_SUFFIX}"
+            echo
+            echo "$LINE"
             echo
             echo '```json'
             echo "$PAYLOAD"
