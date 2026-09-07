@@ -344,7 +344,7 @@ jobs:
         if: steps.preview-reuse.outputs.reuse != 'true'
         run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
         if: steps.preview-reuse.outputs.reuse != 'true'
 
       - name: Build & Push
