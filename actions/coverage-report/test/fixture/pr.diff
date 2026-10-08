@@ -1,0 +1,34 @@
+diff --git a/src/cart.js b/src/cart.js
+index 1dd5ade..c1d71b2 100644
+--- a/src/cart.js
++++ b/src/cart.js
+@@ -7,0 +8,7 @@ export function itemCount(items) {
++
++export function applyDiscount(total, code) {
++  if (code === 'WELCOME10') {
++    return total * 0.9
++  }
++  return total
++}
+diff --git a/src/shipping.js b/src/shipping.js
+new file mode 100644
+index 0000000..976fb22
+--- /dev/null
++++ b/src/shipping.js
+@@ -0,0 +1,16 @@
++export function shippingCost(total, country) {
++  if (country !== 'ES') {
++    throw new Error(`No enviamos a ${country}`)
++  }
++  if (total >= 50) {
++    return 0
++  }
++  return 4.95
++}
++
++export function estimatedDays(country) {
++  if (country === 'ES') {
++    return 2
++  }
++  return 5
++}

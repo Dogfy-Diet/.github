@@ -1,0 +1,120 @@
+# =============================================================================
+# COMPOSITE ACTION: COVERAGE REPORT
+# =============================================================================
+# Turns the coverage of a test run (Vitest or Jest, Istanbul format) into a PR
+# comment: coverage of the new code, the files the PR touches, a map of where
+# the untested lines are and the exact new lines without tests.
+#
+# Run it in the same job as the tests, after them, on a pull_request event.
+# The caller needs: a checkout with the PR base available (fetch-depth: 0) and
+# the json-summary, json and lcov coverage reporters.
+#
+# Destination: Dogfy-Diet/.github/actions/coverage-report
+# =============================================================================
+name: Coverage report
+description: Publishes a coverage report of the PR's new code as a PR comment and job summary.
+
+inputs:
+  coverage-dir:
+    description: Directory with coverage-summary.json, coverage-final.json and lcov.info.
+    default: coverage
+  title:
+    description: Name shown in the header (e.g. the service).
+    default: ""
+  threshold:
+    description: Target coverage of the new code, in percent. Informative only, never fails the job.
+    default: "80"
+  base-summary:
+    description: coverage-summary.json of the base branch, for the project deltas. Optional.
+    default: ""
+  report-url:
+    description: Link to the full HTML report (e.g. the artifact-url output of actions/upload-artifact).
+    default: ""
+  runner:
+    description: Label for the footer, e.g. "Vitest · v8".
+    default: ""
+  comment:
+    description: Publish (or update) the PR comment. "false" leaves only the job summary.
+    default: "true"
+  cards:
+    description: Render the SVG cards. They are committed to `assets-branch` in the calling repo, so the token needs contents:write.
+    default: "true"
+  assets-branch:
+    description: Orphan branch where the SVG cards are stored.
+    default: coverage-assets
+  marker:
+    description: Hidden marker that identifies the comment. Change it to keep several reports in one PR.
+    default: coverage-report
+  github-token:
+    description: Token with pull-requests:write (comment) and contents:write (cards).
+    default: ${{ github.token }}
+
+outputs:
+  new-code-pct:
+    description: Percent of the PR's new executable lines covered by tests (empty if the PR adds none).
+    value: ${{ steps.render.outputs.new-code-pct }}
+  project-lines-pct:
+    description: Line coverage of the whole project.
+    value: ${{ steps.render.outputs.project-lines-pct }}
+
+runs:
+  using: composite
+  steps:
+    - name: Render report
+      id: render
+      shell: bash
+      env:
+        COVERAGE_DIR: ${{ inputs.coverage-dir }}
+        TITLE: ${{ inputs.title }}
+        THRESHOLD: ${{ inputs.threshold }}
+        BASE_SUMMARY: ${{ inputs.base-summary }}
+        REPORT_URL: ${{ inputs.report-url }}
+        RUNNER_LABEL: ${{ inputs.runner }}
+        MARKER: ${{ inputs.marker }}
+        ASSETS_BRANCH: ${{ inputs.assets-branch }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        if [ -z "$PR" ]; then
+          echo "::notice title=coverage-report::Solo funciona en eventos pull_request; no se publica nada."
+          exit 0
+        fi
+        if [ ! -f "$COVERAGE_DIR/coverage-summary.json" ]; then
+          echo "::warning title=coverage-report::No hay coverage en '$COVERAGE_DIR' (¿faltan los reporters json-summary, json y lcov?)."
+          exit 0
+        fi
+        # Base fetched by checkout (fetch-depth: 0); fetch it if a shallow checkout lacks it.
+        git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --no-tags origin "$BASE_SHA"
+        out="$RUNNER_TEMP/coverage-report"
+        # Tests ran on the checked-out commit (the PR merge commit by default); links and
+        # card paths use the PR head, which is stable and is what reviewers see.
+        sha="${HEAD_SHA:-$(git rev-parse HEAD)}"
+        python3 "$GITHUB_ACTION_PATH/report.py" \
+          --coverage-dir "$COVERAGE_DIR" --repo-dir . --base "$BASE_SHA" --head HEAD \
+          --out "$out" --title "$TITLE" --repository "$REPO" --sha "$sha" \
+          --threshold "$THRESHOLD" --marker "$MARKER" --runner "$RUNNER_LABEL" \
+          --report-url "$REPORT_URL" ${BASE_SUMMARY:+--base-summary "$BASE_SUMMARY"} \
+          --images-url "https://github.com/$REPO/raw/$ASSETS_BRANCH/pr-$PR/${sha:0:7}"
+        {
+          echo "out=$out"
+          echo "sha=$sha"
+          echo "new-code-pct=$(jq -r '.new_code_pct // empty' "$out/summary.json")"
+          echo "project-lines-pct=$(jq -r .project_lines_pct "$out/summary.json")"
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Publish report
+      if: steps.render.outputs.out != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        OUT: ${{ steps.render.outputs.out }}
+        HEAD_SHA: ${{ steps.render.outputs.sha }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        MARKER: ${{ inputs.marker }}
+        CARDS: ${{ inputs.cards }}
+        COMMENT: ${{ inputs.comment }}
+        ASSETS_BRANCH: ${{ inputs.assets-branch }}
+      run: bash "$GITHUB_ACTION_PATH/publish.sh"

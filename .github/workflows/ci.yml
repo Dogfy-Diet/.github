@@ -37,3 +37,12 @@ jobs:
 
       - name: Lint workflows
         run: ./actionlint -color -shellcheck=
+
+  coverage-report:
+    name: coverage-report action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the fixture and check the report
+        run: bash actions/coverage-report/test/run.sh
