@@ -62,12 +62,18 @@ These workflows implement Dogfy's **trunk-based delivery model** — build once 
 | [`release.yml`](.github/workflows/release.yml) | push to main | semantic-release tagging + GitHub Release |
 | [`cleanup-ar-tags.yml`](.github/workflows/cleanup-ar-tags.yml) | cron weekly | prune stale `sha-*` AR tags |
 
+Composite actions (a step inside your own job, not a whole workflow):
+
+| Action | Where | Purpose |
+|---|---|---|
+| [`coverage-report`](actions/coverage-report) | PR, after the tests | coverage of the PR's new code as a PR comment + job summary (Vitest/Jest) |
+
 This repo also has automation **of its own** (not reusable — it runs here):
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | [`release-self.yml`](.github/workflows/release-self.yml) | push to `main` | semver release of **this repo** (tag `vX.Y.Z` + GitHub Release + floating `v1`) |
-| [`ci.yml`](.github/workflows/ci.yml) | PR | actionlint on all workflows |
+| [`ci.yml`](.github/workflows/ci.yml) | PR | actionlint on all workflows + test of the `coverage-report` action |
 | [`dependabot.yml`](.github/dependabot.yml) | weekly | bumps third-party actions used by these workflows |
 
 ---

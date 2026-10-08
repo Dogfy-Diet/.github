@@ -1,0 +1,4 @@
+{"total": {"lines":{"total":13,"covered":7,"skipped":0,"pct":53.84},"statements":{"total":15,"covered":8,"skipped":0,"pct":53.33},"functions":{"total":7,"covered":4,"skipped":0,"pct":57.14},"branches":{"total":8,"covered":4,"skipped":0,"pct":50},"branchesTrue":{"total":0,"covered":0,"skipped":0,"pct":"Unknown"}}
+,"src/cart.js": {"lines":{"total":5,"covered":3,"skipped":0,"pct":60},"functions":{"total":5,"covered":3,"skipped":0,"pct":60},"statements":{"total":7,"covered":4,"skipped":0,"pct":57.14},"branches":{"total":2,"covered":1,"skipped":0,"pct":50}}
+,"src/shipping.js": {"lines":{"total":8,"covered":4,"skipped":0,"pct":50},"functions":{"total":2,"covered":1,"skipped":0,"pct":50},"statements":{"total":8,"covered":4,"skipped":0,"pct":50},"branches":{"total":6,"covered":3,"skipped":0,"pct":50}}
+}
