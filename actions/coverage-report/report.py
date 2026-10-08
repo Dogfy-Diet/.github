@@ -275,15 +275,16 @@ def files_card(t, fs):
                  f'   {x["covered"]}/{x["executable"]} · fichero {es(x["lines"])} %</text>')
         s.append(f'<rect x="{mx}" y="{y + 8}" width="{mw}" height="16" rx="3" fill="{t["track"]}"/>')
 
-        def band(a, b, color, yy, hh):
-            s.append(f'<rect x="{mx + (a - 1) / x["total"] * mw:.1f}" y="{yy}" width="{max(2, (b - a + 1) / x["total"] * mw):.1f}" height="{hh}" fill="{color}"/>')
+        def bands(lines, color, yy, hh):
+            # One rect per run of map pixels, not per run of lines: a 3,000-line file
+            # would otherwise produce thousands of rects for a 300 px wide map.
+            cols = sorted({int((l - 1) / x["total"] * mw) for l in lines})
+            for a, b in ranges(cols, gap=0):
+                s.append(f'<rect x="{mx + a}" y="{yy}" width="{max(2, b - a + 1)}" height="{hh}" fill="{color}"/>')
 
-        for a, b in ranges(x["added"], gap=0):
-            band(a, b, t["accent"], y + 8, 4)
-        for a, b in ranges(set(x["uncovered_all"]) - set(x["uncovered_new"]), gap=0):
-            band(a, b, t["faded"], y + 12, 12)
-        for a, b in ranges(x["uncovered_new"], gap=0):
-            band(a, b, t["red"], y + 12, 12)
+        bands(x["added"], t["accent"], y + 8, 4)
+        bands(set(x["uncovered_all"]) - set(x["uncovered_new"]), t["faded"], y + 12, 12)
+        bands(x["uncovered_new"], t["red"], y + 12, 12)
         s.append(f'<text x="{mx}" y="{y + 41}" font-size="11.5" font-family="{MONO}" fill="{t["muted"]}">L1</text>'
                  f'<text x="{mx + mw}" y="{y + 41}" text-anchor="end" font-size="11.5" font-family="{MONO}" fill="{t["muted"]}">L{x["total"]}</text>')
     s.append(f'<text x="20" y="{H - 14}" font-size="11.5" fill="{t["muted"]}">│ objetivo del {es(args.threshold, 0)} % · de peor a mejor</text>')
