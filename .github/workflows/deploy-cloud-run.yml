@@ -350,7 +350,7 @@ jobs:
       - name: Build & Push
         id: build
         if: steps.preview-reuse.outputs.reuse != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
