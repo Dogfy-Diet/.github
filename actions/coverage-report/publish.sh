@@ -26,13 +26,16 @@ upload_cards() {
     gh api "repos/$REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$commit" --silent || return 1
   fi
 
-  local f current
+  local f current payload="$OUT/upload.json"
   for f in hero-light hero-dark files-light files-dark; do
     # A re-run of the same commit overwrites its cards: the contents API needs the current blob sha.
     current=$(gh api "repos/$REPO/contents/$dir/$f.svg?ref=$branch" --jq .sha 2>/dev/null || true)
-    gh api -X PUT "repos/$REPO/contents/$dir/$f.svg" \
-      -f message="chore: coverage cards for #$PR ($SHA7)" -f branch="$branch" \
-      -f content="$(base64 -w0 <"$OUT/$f.svg")" ${current:+-f sha="$current"} --silent || return 1
+    # The body goes through a file: a big card in base64 exceeds the max size of one argument.
+    jq -n --arg message "chore: coverage cards for #$PR ($SHA7)" --arg branch "$branch" \
+      --rawfile svg "$OUT/$f.svg" --arg sha "$current" \
+      '{message: $message, branch: $branch, content: ($svg | @base64)} + (if $sha == "" then {} else {sha: $sha} end)' \
+      >"$payload" || return 1
+    gh api -X PUT "repos/$REPO/contents/$dir/$f.svg" --input "$payload" --silent || return 1
   done
 }
 
@@ -40,7 +43,7 @@ if [ "$CARDS" = "true" ] && [ -n "$PR" ]; then
   if upload_cards; then
     comment="$OUT/comment-cards.md"
   else
-    echo "::warning title=coverage-report::No se pudieron subir las tarjetas SVG a '$ASSETS_BRANCH' (¿token sin contents: write?). Se publica la versión sin imágenes."
+    echo "::warning title=coverage-report::No se pudieron subir las tarjetas SVG a '$ASSETS_BRANCH' (revisa el log de este paso; ¿token sin contents: write?). Se publica la versión sin imágenes."
   fi
 fi
 
