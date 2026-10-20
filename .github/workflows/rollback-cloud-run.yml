@@ -16,6 +16,8 @@
 # Required GitHub variables (on the chosen environment):
 #   Repository level : AR_REPO
 #   Per environment  : GCP_PROJECT, SA_EMAIL, WIF_PROVIDER
+#   Optional         : SMOKE_JOB (smoke test from inside the VPC when the
+#                      service ingress is not `all`; see promote-cloud-run.yml)
 # =============================================================================
 name: Rollback Cloud Run
 
@@ -289,7 +291,41 @@ jobs:
       # ================================================================
       - name: Smoke test
         if: inputs.smoke_test_path != ''
+        env:
+          SMOKE_JOB: ${{ vars.SMOKE_JOB }}
+          SMOKE_PATH: ${{ inputs.smoke_test_path }}
+          CDN_HOST: ${{ inputs.cdn_host }}
+          SERVICE: ${{ inputs.service }}
+          REGION: ${{ inputs.region }}
+          PROJECT: ${{ vars.GCP_PROJECT }}
         run: |
+          # Same rule as promote-cloud-run.yml: with an ingress-restricted
+          # service and SMOKE_JOB set, the runner cannot reach the service
+          # (run.app 404, WARP hosts 403), so the job tests it from the VPC.
+          if [ -n "$SMOKE_JOB" ]; then
+            INGRESS=$(gcloud run services describe "$SERVICE" \
+              --region="$REGION" --project="$PROJECT" \
+              --format='value(metadata.annotations."run.googleapis.com/ingress")')
+            if [ "$INGRESS" != "all" ]; then
+              if [ -z "$CDN_HOST" ]; then
+                echo "::error::Ingress is '${INGRESS}' and SMOKE_JOB is set, but cdn_host is empty: there is no host to test from inside the VPC"
+                exit 1
+              fi
+              URL="https://${CDN_HOST}${SMOKE_PATH}"
+              echo "Ingress '${INGRESS}': smoke test from inside the VPC with job ${SMOKE_JOB} → ${URL}"
+              if gcloud run jobs execute "$SMOKE_JOB" \
+                --region="$REGION" \
+                --project="$PROJECT" \
+                --update-env-vars="SMOKE_URL=${URL}" \
+                --wait; then
+                echo "Rollback verified on ${URL}"
+                exit 0
+              fi
+              echo "::error::Rollback smoke test FAILED on ${URL}. Job logs: https://console.cloud.google.com/run/jobs/details/${REGION}/${SMOKE_JOB}/executions?project=${PROJECT}"
+              exit 1
+            fi
+          fi
+
           if [ -n "${{ inputs.cdn_host }}" ]; then
             URL="https://${{ inputs.cdn_host }}"
           else
