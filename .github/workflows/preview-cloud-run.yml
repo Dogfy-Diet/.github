@@ -266,7 +266,7 @@ jobs:
       #                   commit's preview build failed or was cancelled, the
       #                   bound tag is absent and the deploy falls back to a
       #                   fresh build instead of reusing a stale image.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
