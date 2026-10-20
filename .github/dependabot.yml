@@ -1,3 +1,7 @@
+# CONGELADO (PTF-319, 2026-09-03): open-pull-requests-limit: 0 en todos los
+# ecosistemas. Dependabot sigue leyendo esta config pero no abre PRs de versión
+# hasta que definamos la estrategia de dependencias. Para reactivarlo basta con
+# restaurar los límites anteriores (5 actions / 10 npm / 5 docker).
 # Dependabot: mantiene al día las actions de terceros que usan los workflows
 # de este repo (actions/checkout, actions/setup-node, ...). Mismo esquema que
 # el resto de repos de la org (PTF-319): semanal, lunes 07:00 Europe/Madrid.
@@ -13,4 +17,4 @@ updates:
     groups:
       actions-minor-patch:
         update-types: ["minor", "patch"]
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
