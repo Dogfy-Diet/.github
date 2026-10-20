@@ -288,7 +288,7 @@ Why digest-first: between "read stg-latest" and "write pro-latest", a concurrent
 | `environment` | no | `production` | GitHub environment (use `pro` if that's your naming) |
 | `region` | no | `europe-west1` | — |
 | `smoke_test_path` | no | `""` | Health check path |
-| `cdn_host` | no | `""` | CDN invalidation host (same rule as deploy) |
+| `cdn_host` | no | `""` | CDN invalidation host (same rule as deploy). Also the host the `SMOKE_JOB` smoke test hits |
 | `sa_email` | no | `""` | Deployer SA override |
 
 **Caller example:**
@@ -853,6 +853,9 @@ No protection rules needed.
 | `SA_EMAIL` | same SA as stg (shared deployer pattern) |
 | `WIF_PROVIDER` | same WIF pool |
 | `CDN_URL_MAP` | `platform-pro-lb-urlmap` |
+| `SMOKE_JOB` | `ci-smoke` (optional) |
+
+`SMOKE_JOB` names the Cloud Run job (`modules/ci_smoke_job` in infrastructure) that runs the promote smoke test from inside the VPC. It is used only when the service ingress is not `all`: then the runner gets 404 from run.app and 403 from hosts behind Cloudflare WARP. Without it the smoke test tries run.app and then `https://<cdn_host>`, as before. PTF-436.
 
 Enable **Required reviewers** as protection rule on `pro` for promote/rollback.
 

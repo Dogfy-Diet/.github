@@ -52,6 +52,14 @@
 #   Per environment  : GCP_PROJECT  (e.g. dogfy-platform-pro)
 #                      SA_EMAIL     (deployer SA for this service)
 #                      WIF_PROVIDER (WIF provider full resource name)
+#
+# Optional, per environment:
+#                      SMOKE_JOB    (e.g. ci-smoke) Cloud Run job that runs the
+#                                   smoke test from inside the VPC when the
+#                                   service ingress is not `all`: the runner
+#                                   cannot reach run.app (404) nor hosts behind
+#                                   Cloudflare WARP (403). Requires cdn_host.
+#                                   Infra: modules/ci_smoke_job (PTF-436).
 # =============================================================================
 name: Promote to Production
 
@@ -509,6 +517,13 @@ jobs:
             --project=${{ vars.GCP_PROJECT }} \
             --format='value(status.url)')
           echo "run_url=${RUN_URL}" >> "$GITHUB_OUTPUT"
+          # Ingress decides where the smoke test can run from: with anything
+          # but `all`, run.app answers 404 to the runner.
+          INGRESS=$(gcloud run services describe ${{ inputs.service }} \
+            --region=${{ inputs.region }} \
+            --project=${{ vars.GCP_PROJECT }} \
+            --format='value(metadata.annotations."run.googleapis.com/ingress")')
+          echo "ingress=${INGRESS}" >> "$GITHUB_OUTPUT"
           # Public/display URL: the custom domain when fronted by a LB+CDN, else
           # the run.app. Used for CDN invalidation and the deployment env URL.
           if [ -n "${{ inputs.cdn_host }}" ]; then
@@ -523,7 +538,37 @@ jobs:
       - name: Smoke test
         id: smoke
         if: inputs.smoke_test_path != ''
+        env:
+          SMOKE_JOB: ${{ vars.SMOKE_JOB }}
+          SMOKE_PATH: ${{ inputs.smoke_test_path }}
+          INGRESS: ${{ steps.url.outputs.ingress }}
+          CDN_HOST: ${{ inputs.cdn_host }}
+          REGION: ${{ inputs.region }}
+          PROJECT: ${{ vars.GCP_PROJECT }}
         run: |
+          # Ingress-restricted service + SMOKE_JOB: neither run.app nor (behind
+          # Cloudflare WARP) the public host are reachable from the runner, so
+          # the job runs the test from inside the VPC, through the same LB as
+          # users. It retries on its own; a failed execution fails this step.
+          if [ -n "$SMOKE_JOB" ] && [ "$INGRESS" != "all" ]; then
+            if [ -z "$CDN_HOST" ]; then
+              echo "::error::Ingress is '${INGRESS}' and SMOKE_JOB is set, but cdn_host is empty: there is no host to test from inside the VPC"
+              exit 1
+            fi
+            URL="https://${CDN_HOST}${SMOKE_PATH}"
+            echo "Ingress '${INGRESS}': smoke test from inside the VPC with job ${SMOKE_JOB} → ${URL}"
+            if gcloud run jobs execute "$SMOKE_JOB" \
+              --region="$REGION" \
+              --project="$PROJECT" \
+              --update-env-vars="SMOKE_URL=${URL}" \
+              --wait; then
+              echo "Smoke test passed on ${URL}"
+              exit 0
+            fi
+            echo "::error::Smoke test FAILED on ${URL}. Job logs: https://console.cloud.google.com/run/jobs/details/${REGION}/${SMOKE_JOB}/executions?project=${PROJECT}"
+            exit 1
+          fi
+
           # Hit the Cloud Run revision directly (run.app) first — robust against
           # CDN/LB cold-start propagation. Fall back to the public URL so
           # ingress-restricted services (e.g. IAP / LB-only) are still covered;
