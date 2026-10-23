@@ -77,7 +77,10 @@ jobs:
           if [ -n "${{ inputs.extra_plugins }}" ]; then
             PLUGINS="$PLUGINS ${{ inputs.extra_plugins }}"
           fi
-          npm install -D $PLUGINS
+          # Outside the checkout: `npm install -D` here used to add these to the
+          # caller's package.json and, in a pnpm repo, create a package-lock.json
+          # that @semantic-release/git then committed to main.
+          npm install --prefix "$RUNNER_TEMP/semantic-release" --no-audit --no-fund $PLUGINS
 
       - name: Generate default config
         run: |
@@ -133,7 +136,8 @@ jobs:
           GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
-        run: npx semantic-release
+        run: |
+          "$RUNNER_TEMP/semantic-release/node_modules/.bin/semantic-release"
 
       # semantic-release's CLI does not emit GitHub Actions outputs. Resolve
       # the result from the semver tag it creates on the checked-out commit.

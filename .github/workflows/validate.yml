@@ -7,6 +7,13 @@
 # By default all checks are blocking (strict). To make specific checks
 # non-blocking (report as warning), list them in `non_strict_checks`.
 #
+# npm by default. `package_manager: pnpm` installs pnpm (the version in the
+# caller's package.json "packageManager" field) and caches its store. The
+# command defaults below are npm ones, so pnpm callers must pass every
+# command they use: each job fails early if one of its commands still runs
+# npm (a pnpm repo has no package-lock.json, and a forgotten non-blocking
+# `npm audit` would otherwise just turn into a warning).
+#
 # Destination: Dogfy-Diet/.github/.github/workflows/validate.yml
 # =============================================================================
 name: Validate
@@ -17,6 +24,10 @@ on:
       node_version:
         type: string
         default: "22"
+      package_manager:
+        type: string
+        default: "npm"
+        description: "'npm' or 'pnpm'. With pnpm, pass every command you use: the defaults are npm ones."
       install_command:
         type: string
         default: "npm ci"
@@ -55,7 +66,7 @@ on:
       cache_node_modules:
         type: boolean
         default: true
-        description: "Cache node_modules across runs (key = package-lock.json hash)."
+        description: "Cache node_modules across runs (key = lockfile hash: package-lock.json or pnpm-lock.yaml)."
       cache_service_name:
         type: string
         default: "default"
@@ -87,6 +98,26 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
+      - name: Check commands match the package manager
+        if: inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          install_command: ${{ inputs.install_command }}
+          setup_command: ${{ inputs.setup_command }}
+          lint_command: ${{ inputs.lint_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          for name in install_command setup_command lint_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
       - uses: actions/checkout@v4
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
@@ -100,10 +131,13 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+      - name: Set up pnpm
+        if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
       - name: Restore node_modules cache
         if: inputs.cache_node_modules
         uses: actions/cache@v4
@@ -111,9 +145,9 @@ jobs:
           path: |
             node_modules
             **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-
       - name: Load app-specific env vars
         if: inputs.env_vars != ''
         run: |
@@ -159,6 +193,26 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
+      - name: Check commands match the package manager
+        if: inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          install_command: ${{ inputs.install_command }}
+          setup_command: ${{ inputs.setup_command }}
+          typecheck_command: ${{ inputs.typecheck_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          for name in install_command setup_command typecheck_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
       - uses: actions/checkout@v4
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
@@ -172,10 +226,13 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+      - name: Set up pnpm
+        if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
       - name: Restore node_modules cache
         if: inputs.cache_node_modules
         uses: actions/cache@v4
@@ -183,9 +240,9 @@ jobs:
           path: |
             node_modules
             **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-
       - name: Load app-specific env vars
         if: inputs.env_vars != ''
         run: |
@@ -231,6 +288,26 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
+      - name: Check commands match the package manager
+        if: inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          install_command: ${{ inputs.install_command }}
+          setup_command: ${{ inputs.setup_command }}
+          test_command: ${{ inputs.test_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          for name in install_command setup_command test_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
       - uses: actions/checkout@v4
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
@@ -244,10 +321,13 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+      - name: Set up pnpm
+        if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
       - name: Restore node_modules cache
         if: inputs.cache_node_modules
         uses: actions/cache@v4
@@ -255,9 +335,9 @@ jobs:
           path: |
             node_modules
             **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-
       - name: Load app-specific env vars
         if: inputs.env_vars != ''
         run: |
@@ -303,6 +383,26 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
+      - name: Check commands match the package manager
+        if: inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          install_command: ${{ inputs.install_command }}
+          setup_command: ${{ inputs.setup_command }}
+          build_command: ${{ inputs.build_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          for name in install_command setup_command build_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
       - uses: actions/checkout@v4
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
@@ -316,10 +416,13 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+      - name: Set up pnpm
+        if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
       - name: Restore node_modules cache
         if: inputs.cache_node_modules
         uses: actions/cache@v4
@@ -327,9 +430,9 @@ jobs:
           path: |
             node_modules
             **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-
       - name: Load app-specific env vars
         if: inputs.env_vars != ''
         run: |
@@ -375,6 +478,25 @@ jobs:
     outputs:
       status: ${{ steps.run.outputs.status }}
     steps:
+      - name: Check commands match the package manager
+        if: inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          install_command: ${{ inputs.install_command }}
+          audit_command: ${{ inputs.audit_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          for name in install_command audit_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
       - uses: actions/checkout@v4
       - name: Fetch submodules
         if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
@@ -388,10 +510,13 @@ jobs:
             git submodule update --init
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+      - name: Set up pnpm
+        if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
       - name: Restore node_modules cache
         if: inputs.cache_node_modules
         uses: actions/cache@v4
@@ -399,9 +524,9 @@ jobs:
           path: |
             node_modules
             **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.cache_service_name }}-
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-
       - name: Load app-specific env vars
         if: inputs.env_vars != ''
         run: |
