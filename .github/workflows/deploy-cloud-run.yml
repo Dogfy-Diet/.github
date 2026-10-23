@@ -50,6 +50,10 @@ on:
       node_version:
         type: string
         default: ""
+      package_manager:
+        type: string
+        default: "npm"
+        description: "'npm' or 'pnpm' for install_command and build_command. With pnpm, also pass node_version."
       install_command:
         type: string
         default: ""
@@ -92,7 +96,7 @@ on:
       cache_node_modules:
         type: boolean
         default: true
-        description: "Cache node_modules across runs (key = package-lock.json hash). Ignored if install_command is empty."
+        description: "Cache node_modules across runs (key = lockfile hash: package-lock.json or pnpm-lock.yaml). Ignored if install_command is empty."
       build_cache_path:
         type: string
         default: ""
@@ -258,11 +262,40 @@ jobs:
           fi
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
 
+      - name: Check commands match the package manager
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          NODE_VERSION: ${{ inputs.node_version }}
+          install_command: ${{ inputs.install_command }}
+          build_command: ${{ inputs.build_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          if [ -n "${install_command}${build_command}" ] && [ -z "$NODE_VERSION" ]; then
+            echo "::error::package_manager is 'pnpm': pass node_version too (pnpm 11 needs Node 22 or later)."
+            status=1
+          fi
+          for name in install_command build_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Set up pnpm
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - uses: actions/setup-node@v4
         if: steps.preview-reuse.outputs.reuse != 'true' && inputs.node_version != ''
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
 
       - name: Restore node_modules cache
         if: steps.preview-reuse.outputs.reuse != 'true' && inputs.install_command != '' && inputs.cache_node_modules
@@ -272,9 +305,9 @@ jobs:
           path: |
             node_modules
             **/node_modules
-          key: ${{ runner.os }}-nm-${{ inputs.service }}-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.service }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-nm-${{ inputs.service }}-
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.service }}-
 
       - name: Load app-specific env vars
         if: steps.preview-reuse.outputs.reuse != 'true' && inputs.env_vars != ''
