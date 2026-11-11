@@ -472,6 +472,13 @@ jobs:
           BUILD="${{ needs.build.outputs.status }}"
           AUDIT="${{ needs.audit.outputs.status }}"
 
+          # What GitHub says about each job, whatever the job managed to report.
+          LINT_RESULT="${{ needs.lint.result }}"
+          TYPECHECK_RESULT="${{ needs.typecheck.result }}"
+          TEST_RESULT="${{ needs.test.result }}"
+          BUILD_RESULT="${{ needs.build.result }}"
+          AUDIT_RESULT="${{ needs.audit.result }}"
+
           {
             echo "## Validation Results"
             echo ""
@@ -483,7 +490,19 @@ jobs:
           WARNINGS=0
 
           for check in lint typecheck test build audit; do
-            STATUS=$(eval echo \$$(echo $check | tr '[:lower:]' '[:upper:]'))
+            NAME=$(echo $check | tr '[:lower:]' '[:upper:]')
+            STATUS=$(eval echo \$$NAME)
+            RESULT=$(eval echo \$${NAME}_RESULT)
+
+            # A job that fails before its check runs (the install, the setup
+            # command, a cancelled runner) reports no status. That is a
+            # failure, and it blocks even for a non-strict check: the check
+            # itself never ran.
+            if [ -z "$STATUS" ] && { [ "$RESULT" = "failure" ] || [ "$RESULT" = "cancelled" ]; }; then
+              echo "| ${check^} | ❌ did not run (job ${RESULT}) | Yes |" >> "$GITHUB_STEP_SUMMARY"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
 
             # Skip checks that didn't run (empty command)
             if [ -z "$STATUS" ]; then
