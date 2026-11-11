@@ -276,7 +276,7 @@ jobs:
           fi
           status=0
           if [ -n "${install_command}${build_command}" ] && [ -z "$NODE_VERSION" ]; then
-            echo "::error::package_manager is 'pnpm': pass node_version too (pnpm 11 needs Node 22 or later)."
+            echo "::error::package_manager is 'pnpm': pass node_version too (pnpm needs Node 22 or later)."
             status=1
           fi
           for name in install_command build_command; do

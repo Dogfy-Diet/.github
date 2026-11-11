@@ -843,12 +843,12 @@ jobs:
       audit_command: pnpm audit --prod --audit-level high
 ```
 
-- pnpm is installed with [`pnpm/action-setup`](https://github.com/pnpm/action-setup), using the version in the repo's `package.json` `"packageManager"` field (e.g. `"pnpm@11.28.6"`). Without that field the job fails.
+- pnpm is installed with [`pnpm/action-setup`](https://github.com/pnpm/action-setup), using the version in the repo's `package.json` `"packageManager"` field (e.g. `"pnpm@12.15.0"`). Without that field the job fails.
 - The command defaults are npm ones. With `pnpm`, pass every command you use, or `''` to skip a check: each job fails early if one of its commands still runs npm. Otherwise a forgotten `audit_command` would run `npm audit`, fail for lack of a `package-lock.json` and, being non-blocking, only leave a warning.
 - In `deploy-cloud-run.yml` and `preview-cloud-run.yml`, pass `node_version` together with `install_command` or `build_command`.
 - The `node_modules` cache key hashes `pnpm-lock.yaml` and is namespaced per package manager, so a repo that switches to pnpm never restores its old npm `node_modules`.
 - In the caller's `paths:` filters, replace `package-lock.json` with `pnpm-lock.yaml` and `pnpm-workspace.yaml`. Otherwise a dependency-only change never reaches production.
-- Pin pnpm 11 for now. With a pinned version, pnpm 12 writes a two-document `pnpm-lock.yaml` that GitHub's dependency graph doesn't read yet, so Dependabot alerts stop.
+- pnpm 11 and 12 both work. GitHub's dependency graph reads the two-document `pnpm-lock.yaml` that pnpm 12 writes since November 2026. After migrating, open **Security → Dependabot alerts → ⋯ → Refresh Dependabot alerts** and check that the number of alerts matches the one before.
 
 ### Migrating a repo
 
@@ -858,15 +858,15 @@ The order of the first three steps matters:
 2. Add `"packageManager": "pnpm@<version>"` to `package.json`.
 3. Run `pnpm import`: it builds `pnpm-lock.yaml` from `package-lock.json` with the same versions. Compare them, then delete `package-lock.json`. Importing before moving the overrides makes `pnpm install --frozen-lockfile` fail with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
 4. Run `pnpm install` and decide in `allowBuilds` every dependency that asks to run install scripts.
-5. `.npmrc` keeps only auth and registries: pnpm 11 ignores the rest (e.g. `legacy-peer-deps`, `engine-strict`). `@scope:registry=` lines move to `registries:` in `pnpm-workspace.yaml`.
+5. `.npmrc` keeps only auth and registries: pnpm ignores the rest (e.g. `legacy-peer-deps`, `engine-strict`). `@scope:registry=` lines move to `registries:` in `pnpm-workspace.yaml`.
 6. Scripts, git hooks and agent docs (`CLAUDE.md`, `AGENTS.md`): `npm run` → `pnpm run`, `npx` → `pnpm exec` (or `pnpm dlx`), `npm install` → `pnpm install`.
-7. Dockerfile: `corepack enable` (Node 22 and 24 ship it, Node 25 doesn't), copy `pnpm-lock.yaml` and `pnpm-workspace.yaml`, run `pnpm install --frozen-lockfile` (`--prod` in the final stage) and start the final image with `node`, not with a package manager.
+7. Dockerfile: first check whether the image needs a package manager at all. If the build output already carries its dependencies (a Nuxt/Nitro `.output`, a bundled server), copy only that and drop the install stage. Otherwise install pnpm with `npm install -g pnpm@<version>`, copy `pnpm-lock.yaml` and `pnpm-workspace.yaml` and run `pnpm install --frozen-lockfile` (`--prod` in the final stage). Don't use `corepack enable`: Node 25 and later ship without Corepack, and older Corepack releases cannot start pnpm 12. Start the final image with `node`, not with a package manager.
 8. Dependabot: `package-ecosystem: npm` covers pnpm. Add a `cooldown` of at least one day so it doesn't propose versions that `minimumReleaseAge` rejects.
 
 Baseline `pnpm-workspace.yaml`:
 
 ```yaml
-# pnpm 11 defaults, spelled out so they show up in reviews
+# Spelled out, even where they match pnpm's defaults, so they show up in reviews
 minimumReleaseAge: 1440    # minutes: don't install versions younger than a day
 strictDepBuilds: true      # fail if a dependency with install scripts isn't in allowBuilds
 blockExoticSubdeps: true   # no transitive dependencies from git or URLs
