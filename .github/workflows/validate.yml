@@ -1,8 +1,8 @@
 # =============================================================================
 # REUSABLE WORKFLOW: VALIDATE
 # =============================================================================
-# Runs lint, typecheck, test, build, and security audit in parallel.
-# Each step is optional — pass an empty string to skip it.
+# Runs lint, typecheck, test, build, security audit and an optional lockfile
+# check in parallel. Each step is optional — pass an empty string to skip it.
 #
 # By default all checks are blocking (strict). To make specific checks
 # non-blocking (report as warning), list them in `non_strict_checks`.
@@ -51,6 +51,10 @@ on:
         type: string
         default: "npm audit --audit-level=moderate"
         description: "Security audit command. Empty = skip."
+      lockfile_command:
+        type: string
+        default: ""
+        description: "Lockfile health check (e.g. pnpm dedupe --check && pnpm peers check). Runs after install. Empty = skip."
       setup_command:
         type: string
         default: ""
@@ -58,7 +62,7 @@ on:
       non_strict_checks:
         type: string
         default: "audit"
-        description: "Comma-separated list of checks that are non-blocking (warning only). Options: lint, typecheck, test, build, audit. Default: 'audit'."
+        description: "Comma-separated list of checks that are non-blocking (warning only). Options: lint, typecheck, test, build, audit, lockfile. Default: 'audit'."
       submodules:
         type: string
         default: "false"
@@ -561,13 +565,109 @@ jobs:
             fi
           fi
 
+  # Catches a lockfile that installs fine but is not what the repo means to
+  # ship: duplicated copies of a package that a dedupe would merge (two copies
+  # of vue broke the server render of website-rebranding on 12/11/2026) or
+  # peer dependencies that are missing or out of range.
+  lockfile:
+    name: Lockfile
+    if: inputs.lockfile_command != ''
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_API_TOKEN: ${{ secrets.submodules_token }}
+    outputs:
+      status: ${{ steps.run.outputs.status }}
+    steps:
+      - name: Check commands match the package manager
+        if: inputs.package_manager != 'npm'
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package_manager }}
+          install_command: ${{ inputs.install_command }}
+          lockfile_command: ${{ inputs.lockfile_command }}
+        run: |
+          if [ "$PACKAGE_MANAGER" != pnpm ]; then
+            echo "::error::package_manager must be 'npm' or 'pnpm', got '${PACKAGE_MANAGER}'."
+            exit 1
+          fi
+          status=0
+          for name in install_command lockfile_command; do
+            if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
+              echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
+              status=1
+            fi
+          done
+          exit "$status"
+      - uses: actions/checkout@v4
+      - name: Fetch submodules
+        if: inputs.submodules == 'true' || inputs.submodules == 'recursive'
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.submodules_token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ "${{ inputs.submodules }}" = "recursive" ]; then
+            git submodule update --init --recursive
+          else
+            git submodule update --init
+          fi
+          git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
+      - name: Set up pnpm
+        if: inputs.package_manager == 'pnpm'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: ${{ inputs.package_manager }}
+      - name: Restore node_modules cache
+        if: inputs.cache_node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            **/node_modules
+          key: ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-nm-${{ inputs.package_manager == 'pnpm' && 'pnpm-' || '' }}${{ inputs.cache_service_name }}-
+      - name: Load app-specific env vars
+        if: inputs.env_vars != ''
+        run: |
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in \#*) continue ;; esac
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.env_vars }}"
+      - env:
+          # Exposed for installs that fetch private git npm dependencies (e.g.
+          # website's @dogfy-diet/external-packages). Same PAT the caller
+          # already passes for submodules; empty string when not passed, so
+          # callers that don't reference it are unaffected.
+          GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
+        run: ${{ inputs.install_command }}
+      - name: Run lockfile check
+        id: run
+        run: |
+          STRICT=true
+          if echo "${{ inputs.non_strict_checks }}" | grep -qw "lockfile"; then
+            STRICT=false
+          fi
+          if ${{ inputs.lockfile_command }}; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            if [ "$STRICT" = "true" ]; then
+              echo "status=failure" >> "$GITHUB_OUTPUT"
+              exit 1
+            else
+              echo "::warning::Lockfile issues found (non-blocking)"
+              echo "status=warning" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   # ===========================================================================
   # SUMMARY — aggregates results, only shows checks that ran
   # ===========================================================================
   summary:
     name: Summary
     if: always()
-    needs: [lint, typecheck, test, build, audit]
+    needs: [lint, typecheck, test, build, audit, lockfile]
     runs-on: ubuntu-latest
     steps:
       - name: Validation summary
@@ -596,6 +696,7 @@ jobs:
           TEST="${{ needs.test.outputs.status }}"
           BUILD="${{ needs.build.outputs.status }}"
           AUDIT="${{ needs.audit.outputs.status }}"
+          LOCKFILE="${{ needs.lockfile.outputs.status }}"
 
           # What GitHub says about each job, whatever the job managed to report.
           LINT_RESULT="${{ needs.lint.result }}"
@@ -603,6 +704,7 @@ jobs:
           TEST_RESULT="${{ needs.test.result }}"
           BUILD_RESULT="${{ needs.build.result }}"
           AUDIT_RESULT="${{ needs.audit.result }}"
+          LOCKFILE_RESULT="${{ needs.lockfile.result }}"
 
           {
             echo "## Validation Results"
@@ -614,7 +716,7 @@ jobs:
           FAILED=0
           WARNINGS=0
 
-          for check in lint typecheck test build audit; do
+          for check in lint typecheck test build audit lockfile; do
             NAME=$(echo $check | tr '[:lower:]' '[:upper:]')
             STATUS=$(eval echo \$$NAME)
             RESULT=$(eval echo \$${NAME}_RESULT)

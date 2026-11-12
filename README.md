@@ -52,7 +52,7 @@ These workflows implement Dogfy's **trunk-based delivery model** — build once 
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| [`validate.yml`](.github/workflows/validate.yml) | PR | lint + typecheck + test + build + audit (parallel) |
+| [`validate.yml`](.github/workflows/validate.yml) | PR | lint + typecheck + test + build + audit + lockfile check (parallel) |
 | [`preview-cloud-run.yml`](.github/workflows/preview-cloud-run.yml) | PR | ephemeral Cloud Run tag `pr-N` with PR comment |
 | [`cleanup-preview.yml`](.github/workflows/cleanup-preview.yml) | PR closed | remove traffic tag + delete AR `pr-N` |
 | [`deploy-cloud-run.yml`](.github/workflows/deploy-cloud-run.yml) | push to main (or `workflow_dispatch`) | build + push + deploy stg + smoke + CDN invalidate |
@@ -209,6 +209,7 @@ Build + push + deploy to staging. Designed for `push: branches: [main]` with a `
 | `node_version` | no | `""` | Node version for optional runner-side prebuild |
 | `package_manager` | no | `npm` | `npm` or `pnpm` for the prebuild commands. See [pnpm](#pnpm) |
 | `install_command` | no | `""` | Install command for prebuild (e.g. `npm ci`) |
+| `lockfile_command` | no | `""` | Lockfile health check after install, before the build (e.g. `pnpm dedupe --check`). Failing stops the deploy. See [Lockfile health](#lockfile-health) |
 | `build_command` | no | `""` | Runner-side command before Docker; can build or materialize dynamic inputs into the context |
 | `build_secret_manager_secrets` | no | `""` | Secret Manager mappings exposed only to `build_command` (`ENV_NAME:PROJECT/SECRET`) |
 | `mutable_build_inputs` | no | `false` | Force a fresh staging build when `build_command` consumes external data that can change without a Git commit |
@@ -386,7 +387,7 @@ jobs:
 
 ### [`validate.yml`](.github/workflows/validate.yml)
 
-Runs lint, typecheck, test, build, and security audit **in parallel**. Each check is optional (pass an empty string to skip) and can be marked strict or non-strict.
+Runs lint, typecheck, test, build, security audit and a lockfile check **in parallel**. Each check is optional (pass an empty string to skip) and can be marked strict or non-strict. The lockfile check is off by default and not drawn below; see [Lockfile health](#lockfile-health).
 
 ```
 ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
@@ -413,8 +414,9 @@ Runs lint, typecheck, test, build, and security audit **in parallel**. Each chec
 | `test_command` | `npm test` | Tests. Empty = skip |
 | `build_command` | `npm run build` | Build. Empty = skip |
 | `audit_command` | `npm audit --audit-level=moderate` | Audit. Empty = skip |
+| `lockfile_command` | `""` | Lockfile health check, e.g. `pnpm dedupe --check && pnpm peers check`. Empty = skip. See [Lockfile health](#lockfile-health) |
 | `setup_command` | `""` | Pre-check setup (e.g. `npx nuxt prepare`) |
-| `non_strict_checks` | `"audit"` | Comma-list of checks that don't block (any of: `lint`, `typecheck`, `test`, `build`, `audit`) |
+| `non_strict_checks` | `"audit"` | Comma-list of checks that don't block (any of: `lint`, `typecheck`, `test`, `build`, `audit`, `lockfile`) |
 | `env_vars` | `""` | Multiline dummy env vars for checks that read them |
 | `cache_service_name` | `""` | Cache key namespace (helpful in monorepos) |
 | `submodules` | `"false"` | — |
@@ -841,6 +843,7 @@ jobs:
       test_command: pnpm test
       build_command: pnpm build
       audit_command: pnpm audit --prod --audit-level high
+      lockfile_command: pnpm dedupe --check && pnpm peers check
 ```
 
 - pnpm is installed with [`pnpm/action-setup`](https://github.com/pnpm/action-setup), using the version in the repo's `package.json` `"packageManager"` field (e.g. `"pnpm@12.15.0"`). Without that field the job fails.
@@ -849,6 +852,39 @@ jobs:
 - The `node_modules` cache key hashes `pnpm-lock.yaml` and is namespaced per package manager, so a repo that switches to pnpm never restores its old npm `node_modules`.
 - In the caller's `paths:` filters, replace `package-lock.json` with `pnpm-lock.yaml` and `pnpm-workspace.yaml`. Otherwise a dependency-only change never reaches production.
 - pnpm 11 and 12 both work. GitHub's dependency graph reads the two-document `pnpm-lock.yaml` that pnpm 12 writes since November 2026. After migrating, open **Security → Dependabot alerts → ⋯ → Refresh Dependabot alerts** and check that the number of alerts matches the one before.
+
+### Lockfile health
+
+A lockfile can install cleanly and still be wrong. Two checks catch it; neither changes any file:
+
+| Command | Fails when | Fix |
+|---|---|---|
+| `pnpm dedupe --check` | The lockfile holds several copies of a package that one copy could satisfy | Run `pnpm dedupe` and commit `pnpm-lock.yaml` |
+| `pnpm peers check` | A peer dependency is missing or outside the range a package asks for | Bump or add the dependency, or record the exception (below) |
+
+Where they run:
+
+```yaml
+# validate (PRs): both, as one more parallel check
+lockfile_command: pnpm dedupe --check && pnpm peers check
+
+# deploy-cloud-run: after install and before the build. Dedupe only.
+lockfile_command: pnpm dedupe --check
+```
+
+- In `validate.yml` it is one more check: blocking unless `lockfile` is listed in `non_strict_checks`.
+- In `deploy-cloud-run.yml` it stops the deploy before the build. It is there for pushes that never went through a PR; when the deploy reuses the image of the PR preview, nothing is installed and the check is skipped. `preview-cloud-run.yml` has no such input: validate already runs on the same PR.
+- Nothing fixes the lockfile for you. If a check fails, run the fix locally and push.
+
+**Why dedupe.** A library that ships Vue code must share the app's single copy of `vue`, `pinia`, `vue-router` and `vue-i18n`. When a dependency asks for `vue ^3.5.45` and the lockfile has the app on 3.5.44, pnpm keeps both. On 12/11/2026 that left website-rebranding's server bundle without `vue/server-renderer` and every request answered 500; the smoke test rolled the deploy back. Declare those four packages in the app's own `package.json` instead of inheriting them from Nuxt, and bump them together with the library that uses them.
+
+**Why peers.** The npm repos carry `legacy-peer-deps=true`, which makes npm neither install nor validate peer dependencies. pnpm ignores that line: it installs missing peers on its own and only warns about the ones out of range. `pnpm peers check` turns those warnings into a failing check. Exceptions go in `pnpm-workspace.yaml`, one per line with the reason:
+
+```yaml
+peerDependencyRules:
+  allowedVersions:
+    eslint: "9"   # @eslint/js 10 asks for eslint ^10; on 9 until the config is migrated
+```
 
 ### Migrating a repo
 
@@ -861,7 +897,8 @@ The order of the first three steps matters:
 5. `.npmrc` keeps only auth and registries: pnpm ignores the rest (e.g. `legacy-peer-deps`, `engine-strict`). `@scope:registry=` lines move to `registries:` in `pnpm-workspace.yaml`.
 6. Scripts, git hooks and agent docs (`CLAUDE.md`, `AGENTS.md`): `npm run` → `pnpm run`, `npx` → `pnpm exec` (or `pnpm dlx`), `npm install` → `pnpm install`.
 7. Dockerfile: first check whether the image needs a package manager at all. If the build output already carries its dependencies (a Nuxt/Nitro `.output`, a bundled server), copy only that and drop the install stage. Otherwise install pnpm with `npm install -g pnpm@<version>`, copy `pnpm-lock.yaml` and `pnpm-workspace.yaml` and run `pnpm install --frozen-lockfile` (`--prod` in the final stage). Don't use `corepack enable`: Node 25 and later ship without Corepack, and older Corepack releases cannot start pnpm 12. Start the final image with `node`, not with a package manager.
-8. Dependabot: `package-ecosystem: npm` covers pnpm. Add a `cooldown` of at least one day so it doesn't propose versions that `minimumReleaseAge` rejects.
+8. Peers: run `pnpm peers check`. `legacy-peer-deps=true` hid these issues under npm, so expect some on the first run. Fix each one or record it in `peerDependencyRules` with its reason, then run `pnpm dedupe`. Pass `lockfile_command` to validate and deploy once both checks are green. See [Lockfile health](#lockfile-health).
+9. Dependabot: `package-ecosystem: npm` covers pnpm. Add a `cooldown` of at least one day so it doesn't propose versions that `minimumReleaseAge` rejects.
 
 Baseline `pnpm-workspace.yaml`:
 
@@ -880,6 +917,11 @@ allowBuilds: {}
 
 # npm "overrides" from package.json go here (pnpm doesn't read npm's)
 overrides: {}
+
+# Accepted peer dependency mismatches, one per line with the reason.
+# Everything else must pass `pnpm peers check`.
+peerDependencyRules:
+  allowedVersions: {}
 ```
 
 **Urgent security patches.** If the patched version is less than a day old, pnpm silently installs the previous one. Add the exact version to `minimumReleaseAgeExclude` (e.g. `- 'some-package@1.2.3'`; `pnpm audit --fix` does it for you) and check the resolved version in `pnpm-lock.yaml`.
