@@ -64,6 +64,14 @@ on:
           Optional runner-side command executed after install and before the
           Docker build. It may materialize dynamic build inputs (translations,
           generated clients, CMS snapshots, etc.) into the Docker context.
+      lockfile_command:
+        type: string
+        default: ""
+        description: |
+          Optional lockfile health check (e.g. pnpm dedupe --check) executed
+          after install and before build_command. A non-zero exit fails the
+          deploy before anything is built. Covers pushes that skipped the PR
+          checks. Requires install_command.
       build_secret_manager_secrets:
         type: string
         default: ""
@@ -268,6 +276,7 @@ jobs:
           PACKAGE_MANAGER: ${{ inputs.package_manager }}
           NODE_VERSION: ${{ inputs.node_version }}
           install_command: ${{ inputs.install_command }}
+          lockfile_command: ${{ inputs.lockfile_command }}
           build_command: ${{ inputs.build_command }}
         run: |
           if [ "$PACKAGE_MANAGER" != pnpm ]; then
@@ -279,7 +288,7 @@ jobs:
             echo "::error::package_manager is 'pnpm': pass node_version too (pnpm needs Node 22 or later)."
             status=1
           fi
-          for name in install_command build_command; do
+          for name in install_command lockfile_command build_command; do
             if grep -Eq '(^|[[:space:];&|(])npm[[:space:]]' <<< "${!name}"; then
               echo "::error::package_manager is 'pnpm' but ${name} still runs npm: pass its pnpm equivalent."
               status=1
@@ -326,6 +335,17 @@ jobs:
           # callers that don't reference it are unaffected.
           GIT_AUTH_TOKEN: ${{ secrets.submodules_token }}
         run: ${{ inputs.install_command }}
+
+      # Fails here, before the build, when the lockfile installs but is not
+      # healthy (e.g. duplicated copies of a package that `pnpm dedupe` would
+      # merge). The PR checks normally catch it; this covers direct pushes.
+      - name: Check lockfile
+        if: steps.preview-reuse.outputs.reuse != 'true' && inputs.install_command != '' && inputs.lockfile_command != ''
+        run: |
+          if ! ${{ inputs.lockfile_command }}; then
+            echo "::error::Lockfile check failed: the deploy stops before building. Fix the lockfile (for pnpm duplicates: run 'pnpm dedupe' and commit pnpm-lock.yaml)."
+            exit 1
+          fi
 
       # Build cache is keyed strictly by commit SHA with NO restore-keys
       # fallback. A fallback match from a different SHA restored stale Nuxt
