@@ -137,7 +137,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - name: Set up pnpm
         if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -232,7 +232,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - name: Set up pnpm
         if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -327,7 +327,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - name: Set up pnpm
         if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -422,7 +422,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - name: Set up pnpm
         if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -516,7 +516,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - name: Set up pnpm
         if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -612,7 +612,7 @@ jobs:
           git config --global --unset url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf
       - name: Set up pnpm
         if: inputs.package_manager == 'pnpm'
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
